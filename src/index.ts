@@ -9,17 +9,34 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
+import type { IncomingMessage, ServerResponse } from 'node:http'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import z from '@deepseek-ai/schemastery'
 import { createCard, nowDate, type CitationFormat, type ExecutionMode, type OutputFormat, type TimeRange } from './card.js'
-import { runResearch } from './orchestrator.js'
+import { runResearch, type RunTracker } from './orchestrator.js'
+import * as status from './status.js'
 import type { AppContext } from './dispatch.js'
 
 export const name = '@dsh-external/dsh-research-team'
-// workspaceRegistry is optional: some profiles (e.g. headless) do not provide
-// it, and resolveWorkspaceRoot() falls back to the session cwd / process cwd.
+// webServer (optional) serves GET /dsh-research-team/api/status for the client
+// panel's live monitor; subagents/tools are the hard requirements.
 export const inject = ['subagents', 'tools']
+
+/** Client-panel status endpoint (must match src/client/index.tsx). */
+export const STATUS_API_PREFIX = '/dsh-research-team/api/status'
+
+/** Minimal structural type for the optional webServer service. */
+interface WebServerLike {
+  register(route: { kind: 'exact' | 'prefix'; path: string; handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void> }): () => void
+}
+
+/** Monotonic local run id for the status registry. */
+let runCounter = 0
+function runIdSeq(): string {
+  runCounter += 1
+  return `run-${Date.now().toString(36)}-${runCounter}`
+}
 
 export interface Config {
   /** 单章最少来源数提示（硬性要求写死在成员 prompt 中，此处仅透传展示）。 */
@@ -114,10 +131,19 @@ export function apply(ctx: Context & AppContext, config: Config): void {
         progress.push(`[${new Date().toISOString().slice(11, 19)}] ${line}`)
         ctx.logger?.info?.(`[research-team] ${line}`)
       }
+      const run = status.startRun(runIdSeq(), args.topic, mode)
+      const track: RunTracker = {
+        progress: (phase, line) => status.pushProgress(run, phase, line),
+        member: (label, event) => {
+          if (event === 'start') status.memberStarted(run, label)
+          else status.memberSettled(run, label, event.settle)
+        },
+        chapters: (chapters) => status.setChapters(run, chapters),
+      }
 
       try {
         progress_(`立项：${args.topic}（${mode} / ${timeRange}）`)
-        await runResearch(ctx, card, exec.agent, exec.signal, progress_)
+        await runResearch(ctx, card, exec.agent, exec.signal, progress_, track)
 
         // 写入工作区
         const wsRoot = resolveWorkspaceRoot(ctx, exec.agent)
@@ -149,14 +175,43 @@ export function apply(ctx: Context & AppContext, config: Config): void {
           progressLog: progress,
         }
         if (htmlPath) result.htmlPath = htmlPath
+        status.finishRun(run, {
+          reportPath: mdPath,
+          title: card.title ?? args.topic,
+          sourceCount: new Set(card.sourcePool).size,
+        })
         return result
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e)
         progress_(`❌ 失败：${msg}`)
+        status.finishRun(run, { error: msg })
         return { ok: false, error: msg, progressLog: progress }
       }
     },
   })))
+
+  // Live-status HTTP endpoint for the client panel. Reading `ctx.webServer`
+  // without declaring it in `inject` throws ("cannot get property ... without
+  // inject"), and adding it to the static `inject` would keep the plugin
+  // INACTIVE in headless profiles. The callback-style `ctx.inject` activates
+  // the scope only when the service is actually provided.
+  ctx.inject(['webServer'], (webCtx) => {
+    const webServer = (webCtx as Context & { webServer: WebServerLike }).webServer
+    webCtx.effect(() => webServer.register({
+      kind: 'prefix',
+      path: STATUS_API_PREFIX,
+      handler: (req, res) => {
+        const url = new URL(req.url ?? '/', 'http://dsh.local')
+        if (req.method !== 'GET' || url.pathname !== STATUS_API_PREFIX) {
+          res.writeHead(405, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ ok: false, error: { code: 'method-not-allowed', message: 'GET /dsh-research-team/api/status only' } }))
+          return
+        }
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
+        res.end(JSON.stringify({ ok: true, value: status.snapshot() }))
+      },
+    }))
+  })
 
   ctx.logger?.info?.('[dsh-research-team] deep_research 工具已注册')
 }

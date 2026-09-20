@@ -15,8 +15,19 @@
 import { dispatchMember, extractJson, type AppContext, type DispatchOpts, type DispatchResult } from './dispatch.js'
 import type { ChapterState, ResearchCard } from './card.js'
 import { cardDigest, nowDate } from './card.js'
+import * as status from './status.js'
 
 export type ProgressFn = (line: string) => void
+
+/** Optional live-status tracking hook (phase number + the progress line). */
+export interface RunTracker {
+  /** Called on every progress line; `phase` is 0-5. */
+  progress(phase: number, line: string): void
+  /** A member dispatch started/settled (label WITHOUT the team prefix). */
+  member(label: string, event: 'start' | { settle: 'ok' | 'timeout' | 'error' | 'degraded' }): void
+  /** Chapter table replaced (call on every chapter transition). */
+  chapters(chapters: status.ChapterProgress[]): void
+}
 
 const MAX_REVIEW_ROUNDS = 3
 
@@ -97,20 +108,47 @@ export async function runResearch(
   parent: unknown,
   signal: AbortSignal,
   progress: ProgressFn,
+  track?: RunTracker,
 ): Promise<ResearchCard> {
-  const D = (role: DispatchOpts['role'], label: string, task: string, opts?: Partial<DispatchOpts>) =>
-    dispatchMember(ctx, { parent, signal, role, label, task, ...opts })
+  /** Progress line: forwards to the caller AND the optional live tracker. */
+  const P = (phase: number, line: string): void => {
+    progress(line)
+    track?.progress(phase, line)
+  }
+  /** Label prefix so every member child session is recognizable in the UI. */
+  const LABEL_PREFIX = '🔬 [深度研究] '
+  const D = (role: DispatchOpts['role'], label: string, task: string, opts?: Partial<DispatchOpts>) => {
+    track?.member(label, 'start')
+    return dispatchMember(ctx, { parent, signal, role, label: LABEL_PREFIX + label, task, ...opts })
+      .then((r) => {
+        track?.member(label, { settle: r.ok ? 'ok' : (r.stopReason === 'timeout' ? 'timeout' : 'error') })
+        return r
+      }, (e: unknown) => {
+        track?.member(label, { settle: 'error' })
+        throw e
+      })
+  }
+  /** Refresh the tracker's chapter table from the card. */
+  const syncChapters = (over: (s: ChapterState) => Partial<status.ChapterProgress>): void => {
+    track?.chapters(card.sections.map((s) => ({
+      index: s.index,
+      title: s.title,
+      reviewRound: s.reviewRound,
+      status: 'drafting',
+      ...over(s),
+    })))
+  }
 
   // ───────────────────────── Phase 1: 初调（谭溯源） ─────────────────────────
-  progress(`▶ Phase 1/5 初始调研 — 谭溯源 (topic-researcher)`)
+  P(1, `▶ Phase 1/5 初始调研 — 谭溯源 (topic-researcher)`)
   const scoutTask = `模式：初步调研（Phase 1）。\n\n${cardDigest(card)}\n\n请对上述课题执行广泛初调，按你角色定义的「模式一」产出：500-1000 字研究摘要（覆盖定义背景/主流观点与争议/关键数据/主要参与者/最新趋势，全部带真实超链接引用）+ 末尾「已收集来源池」清单（≥8-15 条）。`
   const scout = brief(await D('topic-researcher', '谭溯源·初步调研', scoutTask), 'Phase 1 初调')
   card.scoutingSummary = scout
   card.sourcePool = harvestSourcePool(scout)
-  progress(`✅ Phase 1 完成 — 摘要 ${scout.length} 字，来源池 ${card.sourcePool.length} 条`)
+  P(1, `✅ Phase 1 完成 — 摘要 ${scout.length} 字，来源池 ${card.sourcePool.length} 条`)
 
   // ───────────────────────── Phase 2: 大纲（季要纲） ─────────────────────────
-  progress(`▶ Phase 2/5 大纲规划 — 季要纲 (research-planner)`)
+  P(2, `▶ Phase 2/5 大纲规划 — 季要纲 (research-planner)`)
   const outlineTask = `${cardDigest(card)}\n\n请基于 Phase 1 初调摘要规划报告章节大纲。max_sections=${card.maxSections}。输出 JSON（title/date/sections/rationale）。`
   const outlineRaw = await D('research-planner', '季要纲·大纲规划', outlineTask, {
     forceJson: true,
@@ -130,10 +168,12 @@ export async function runResearch(
     carryOverWarnings: [],
     newSources: [],
   }))
-  progress(`✅ Phase 2 完成 — 《${card.title}》共 ${card.sections.length} 章：${outline.sections.join(' / ')}`)
+  P(2, `✅ Phase 2 完成 — 《${card.title}》共 ${card.sections.length} 章：${outline.sections.join(' / ')}`)
+  syncChapters(() => ({}))
 
   // ───────────────────────── Phase 3: 逐章研究（并行调研 → 串行审稿修订循环） ─────────────
-  progress(`▶ Phase 3/5 逐章研究（调研→审稿→修订，≤${MAX_REVIEW_ROUNDS} 轮）`)
+  P(3, `▶ Phase 3/5 逐章研究（调研→审稿→修订，≤${MAX_REVIEW_ROUNDS} 轮）`)
+  syncChapters(() => ({ status: 'drafting' as const }))
 
   // 3.1 并行调研：每章一个谭溯源副本，共享同一张研究参数卡
   const chapterDrafts = await Promise.all(
@@ -149,12 +189,13 @@ export async function runResearch(
     if ('err' in item) {
       s.draft = undefined
       s.carryOverWarnings.push(`初稿调研失败：${item.err}；本章以大纲要点占位，需专家补研`)
-      progress(`⚠️ 第 ${s.index} 章调研失败（降级：标注占位）— ${s.title}`)
+      P(3, `⚠️ 第 ${s.index} 章调研失败（降级：标注占位）— ${s.title}`)
+      syncChapters((x) => x.index === s.index ? { status: 'degraded' as const } : {})
     } else {
       s.draft = item.r
       s.newSources = harvestSourcePool(item.r)
       if (s.newSources.length > 0) card.sourcePool.push(...s.newSources)
-      progress(`✅ 第 ${s.index} 章初稿完成 — ${s.title}（新增来源 ${s.newSources.length} 条）`)
+      P(3, `✅ 第 ${s.index} 章初稿完成 — ${s.title}（新增来源 ${s.newSources.length} 条）`)
     }
   }
 
@@ -164,7 +205,8 @@ export async function runResearch(
     for (let round = 1; round <= MAX_REVIEW_ROUNDS; round++) {
       s.reviewRound = round
       const forced = round === MAX_REVIEW_ROUNDS
-      progress(`🔄 第 ${s.index} 章审稿 第 ${round}/${MAX_REVIEW_ROUNDS} 轮 — 明鉴秋 (draft-reviewer)${forced ? '（强制通过轮）' : ''}`)
+      P(3, `🔄 第 ${s.index} 章审稿 第 ${round}/${MAX_REVIEW_ROUNDS} 轮 — 明鉴秋 (draft-reviewer)${forced ? '（强制通过轮）' : ''}`)
+      syncChapters((x) => x.index === s.index ? { status: 'reviewing' as const } : {})
 
       const reviewTask = [
         cardDigest(card),
@@ -192,13 +234,14 @@ export async function runResearch(
         // 第 3 轮强制通过
         pass = true
         verdictJson.carry_over.push(...verdictJson.must_fix)
-        progress(`⏭️ 第 ${s.index} 章第 3 轮强制通过，遗留 ${verdictJson.carry_over.length} 条建议`)
+        P(3, `⏭️ 第 ${s.index} 章第 3 轮强制通过，遗留 ${verdictJson.carry_over.length} 条建议`)
       }
 
       if (pass) {
         s.verdict = 'PASS'
         s.carryOverWarnings.push(...verdictJson.carry_over)
-        progress(`✅ 第 ${s.index} 章审稿通过（${round} 轮）— ${s.title}`)
+        P(3, `✅ 第 ${s.index} 章审稿通过（${round} 轮）— ${s.title}`)
+        syncChapters((x) => x.index === s.index ? { status: 'pass' as const } : {})
         break
       }
 
@@ -208,7 +251,8 @@ export async function runResearch(
         ...verdictJson.suggestions.map((m) => `- [建议] ${m}`),
       ].join('\n')
 
-      progress(`✏️ 第 ${s.index} 章退回修订 — 任润泽 (draft-reviser)`)
+      P(3, `✏️ 第 ${s.index} 章退回修订 — 任润泽 (draft-reviser)`)
+      syncChapters((x) => x.index === s.index ? { status: 'revising' as const } : {})
       const reviseTask = [
         cardDigest(card),
         `\n【本章章节任务】第 ${s.index} 章「${s.title}」`,
@@ -222,13 +266,13 @@ export async function runResearch(
       const splitAt = revisedText.search(/^---\s*$/m)
       s.draft = splitAt > 0 ? revisedText.slice(0, splitAt).trim() : revisedText
       s.revisionNote = splitAt > 0 ? revisedText.slice(splitAt).trim() : ''
-      progress(`✅ 第 ${s.index} 章修订完成（进入复审）`)
+      P(3, `✅ 第 ${s.index} 章修订完成（进入复审）`)
     }
   }
-  progress(`✅ Phase 3 完成 — ${card.sections.filter((s) => s.verdict === 'PASS').length}/${card.sections.length} 章通过`)
+  P(3, `✅ Phase 3 完成 — ${card.sections.filter((s) => s.verdict === 'PASS').length}/${card.sections.length} 章通过`)
 
   // ───────────────────────── Phase 4: 报告框架（程文成） ─────────────────────
-  progress(`▶ Phase 4/5 报告框架 — 程文成 (report-writer)`)
+  P(4, `▶ Phase 4/5 报告框架 — 程文成 (report-writer)`)
   const chaptersBody = card.sections
     .map((s) => `\n## 第 ${s.index} 章：${s.title}\n\n${s.draft ?? '【本章调研失败，仅有大纲要点】'}`)
     .join('\n')
@@ -245,7 +289,7 @@ export async function runResearch(
   } catch (e) {
     // 超时降级：简易占位框架（目录=大纲、引言/结论占位、参考文献=来源池），Phase 5 继续
     frameDegraded = true
-    progress(`⚠️ Phase 4 降级 — 程文成未正常完成（${e instanceof Error ? e.message.slice(0, 120) : String(e)}），使用占位框架`)
+    P(4, `⚠️ Phase 4 降级 — 程文成未正常完成（${e instanceof Error ? e.message.slice(0, 120) : String(e)}），使用占位框架`)
     frame = {
       table_of_contents: card.sections.map((s) => `${s.index}. ${s.title}`).join('\n'),
       introduction: `本报告围绕「${card.topic}」展开${card.mode === 'single' ? '专项' : '系统性'}研究，共 ${card.sections.length} 章。（程文成阶段超时降级，引言待补）`,
@@ -254,10 +298,10 @@ export async function runResearch(
     }
   }
   card.frame = frame
-  progress(`✅ Phase 4 完成${frameDegraded ? '（降级）' : ''} — 引言 ${frame.introduction.length} 字 / 结论 ${frame.conclusion.length} 字 / 参考 ${frame.sources.length} 条`)
+  P(4, `✅ Phase 4 完成${frameDegraded ? '（降级）' : ''} — 引言 ${frame.introduction.length} 字 / 结论 ${frame.conclusion.length} 字 / 参考 ${frame.sources.length} 条`)
 
   // ───────────────────────── Phase 5: 发布输出（傅梓铭） ─────────────────────
-  progress(`▶ Phase 5/5 发布输出 — 傅梓铭 (report-publisher)`)
+  P(5, `▶ Phase 5/5 发布输出 — 傅梓铭 (report-publisher)`)
   const allWarnings = card.sections.flatMap((s) =>
     s.carryOverWarnings.map((w) => `- **第 ${s.index} 章 ${s.title}**：${w}`),
   )
@@ -276,7 +320,7 @@ export async function runResearch(
     .then((r) => brief(r, 'Phase 5 发布'))
     .catch((e: unknown) => {
       // 超时降级：主编排器直接拼装最小可用报告，保证产物落盘
-      progress(`⚠️ Phase 5 降级 — 傅梓铭未正常完成（${e instanceof Error ? e.message.slice(0, 120) : String(e)}），编排器代为拼装`)
+      P(5, `⚠️ Phase 5 降级 — 傅梓铭未正常完成（${e instanceof Error ? e.message.slice(0, 120) : String(e)}），编排器代为拼装`)
       return [
         `# ${card.title ?? card.topic}`,
         '',
@@ -299,8 +343,8 @@ export async function runResearch(
       ].join('\n')
     })
   card.finalReport = published
-  progress(`✅ Phase 5 完成 — 最终报告 ${published.length} 字`)
-  progress(`🏁 深度研究《${card.title}》全部阶段完成`)
+  P(5, `✅ Phase 5 完成 — 最终报告 ${published.length} 字`)
+  P(5, `🏁 深度研究《${card.title}》全部阶段完成`)
 
   return card
 }
