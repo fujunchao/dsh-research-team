@@ -39,9 +39,10 @@ interface RunStatus {
   runId: string
   topic: string
   mode: string
+  kind?: 'pipeline' | 'action'
   startedAt: number
   updatedAt: number
-  state: 'running' | 'done' | 'error'
+  state: 'running' | 'paused' | 'done' | 'error'
   phase: number
   headline: string
   log: string[]
@@ -84,30 +85,36 @@ const CHAPTER_ICON: Record<NonNullable<ChapterProgress['status']>, string> = {
 // ───────────────────────────── run monitor UI ─────────────────────────────
 
 function RunCard({ run }: { run: RunStatus }): ReactElement {
-  const running = run.state === 'running'
+  const running = run.state === 'running' || run.state === 'paused'
+  const paused = run.state === 'paused'
+  const action = run.kind === 'action'
   const [showLog, setShowLog] = useState(false)
   return (
-    <div className={`drt-run${running ? ' drt-run--live' : ''}`}>
+    <div className={`drt-run${running ? ' drt-run--live' : ''}${paused ? ' drt-run--paused' : ''}`}>
       <div className="drt-run-head">
-        <span className={`drt-run-dot${running ? ' drt-run-dot--live' : run.state === 'error' ? ' drt-run-dot--err' : ''}`} />
+        <span className={`drt-run-dot${running ? (paused ? ' drt-run-dot--paused' : ' drt-run-dot--live') : run.state === 'error' ? ' drt-run-dot--err' : ''}`} />
         <span className="drt-run-topic">{run.title ?? run.topic}</span>
         <span className="drt-run-mode">{run.mode}</span>
         <span className="drt-run-time">{fmtTime(run.startedAt)} · {fmtDuration(run.startedAt, running ? Date.now() : run.updatedAt)}</span>
       </div>
 
-      {/* phase stepper */}
-      <div className="drt-phases-bar">
-        {PHASES.map((p, i) => {
-          const active = running && run.phase === i
-          const done = run.phase > i || (!running && run.state === 'done')
-          return (
-            <span key={p} className={`drt-phase-chip${active ? ' drt-phase-chip--active' : ''}${done ? ' drt-phase-chip--done' : ''}`}>
-              {i === 0 ? '' : `${i}/`}{p}
-            </span>
-          )
-        })}
+      {/* pipeline runs get the phase stepper; action runs only a member chip row */}
+      {!action && (
+        <div className="drt-phases-bar">
+          {PHASES.map((p, i) => {
+            const active = running && run.phase === i
+            const done = run.phase > i || (!running && run.state === 'done')
+            return (
+              <span key={p} className={`drt-phase-chip${active ? ' drt-phase-chip--active' : ''}${done ? ' drt-phase-chip--done' : ''}`}>
+                {i === 0 ? '' : `${i}/`}{p}
+              </span>
+            )
+          })}
+        </div>
+      )}
+      <div className="drt-headline">
+        {run.state === 'error' ? `❌ ${run.error ?? '失败'}` : paused ? `🟡 ${run.headline}` : run.headline}
       </div>
-      <div className="drt-headline">{run.state === 'error' ? `❌ ${run.error ?? '失败'}` : run.headline}</div>
 
       {/* member activity */}
       {run.members.length > 0 && (
@@ -186,8 +193,8 @@ function Monitor(): ReactElement {
   if (snap === null) {
     return <div className="drt-monitor drt-monitor--empty">📡 正在连接研究团队状态服务…</div>
   }
-  const live = snap.runs.filter((r) => r.state === 'running')
-  const settled = snap.runs.filter((r) => r.state !== 'running')
+  const live = snap.runs.filter((r) => r.state === 'running' || r.state === 'paused')
+  const settled = snap.runs.filter((r) => r.state !== 'running' && r.state !== 'paused')
   return (
     <div className="drt-monitor">
       {live.length === 0 && settled.length === 0 && (
@@ -210,8 +217,9 @@ function Panel(): ReactElement {
         <div className="drt-title">🔬 深度研究团队</div>
         <div className="drt-subtitle">
           移植自 WorkBuddy「深度研究团队」专家团协议：主理人顾全之调度 6 位领域专家，
-          按 5 阶段流水线产出带多源超链接引用的专业研究报告。所有成员子会话以
-          <code>🔬 [深度研究]</code> 前缀出现在会话列表，可点入查看完整工作过程。
+          按三工作流（完整 / 快速 / 单章）产出带多源超链接引用的专业研究报告。
+          完整模式在大纲产出后暂停等待确认（🟡），确认后续跑至报告落盘。
+          所有成员子会话以 <code>🔬 [深度研究]</code> 前缀出现在会话列表，可点入查看完整工作过程。
         </div>
       </div>
 
@@ -234,17 +242,17 @@ function Panel(): ReactElement {
       </div>
 
       <div className="drt-section">
-        <h3>🔄 五阶段流水线</h3>
+        <h3>🔄 三工作流</h3>
         <div className="drt-phases">
-          <div className="drt-phase"><i>1</i><div>初调（谭溯源）<small>广泛初调 500-1000 字摘要 + 来源池 ≥8-15 条</small></div></div>
-          <div className="drt-phase"><i>2</i><div>大纲规划（季要纲）<small>完整 ≤5 章 / 快速 3 章 / 单章 1 章</small></div></div>
-          <div className="drt-phase"><i>3</i><div>逐章研究（谭溯源 → 明鉴秋 → 任润泽）<small>调研 → 审稿 → 修订循环，最多 3 轮，第 3 轮强制通过</small></div></div>
-          <div className="drt-phase"><i>4</i><div>报告框架（程文成）<small>引言 + 结论 + 目录 + 参考文献（目标 ≥20 来源）</small></div></div>
-          <div className="drt-phase"><i>5</i><div>发布输出（傅梓铭）<small>Final QA + 拼装最终报告，写入工作区 reports/</small></div></div>
+          <div className="drt-phase"><i>A</i><div>完整 full（默认）<small>初调 → 大纲 → <b>用户确认</b> → 逐章调研→审稿→修订（≤3 轮）→ 框架 → 发布。≤5 章串行调度（章节小结+来源池逐章传递），&gt;5 章并行。</small></div></div>
+          <div className="drt-phase"><i>B</i><div>快速 quick<small>3 章、跳过审稿修订、免大纲确认，报告顶部标注「未经审稿」。要速度选它。</small></div></div>
+          <div className="drt-phase"><i>C</i><div>单章 single<small>收窄范围只深研一个子课题，走完整审稿循环，直接输出单章报告（无引言/结论）。</small></div></div>
         </div>
         <div className="drt-usage">
-          <b>用法</b>：对 agent 说 <code>用 deep_research 研究 …</code>，或直接让它深度研究某个课题。
-          报告自动写入工作区 <code>reports/</code> 目录。完整模式耗时较长，窄主题建议 quick / single。
+          <b>用法</b>：<code>deep_research</code> 完整流水线（full 首次调用返回大纲与 planId，确认/反馈后续跑）；
+          单一动作（只要调研/审稿/改稿/框架/整合）用 <code>research_member</code>；
+          已完成报告可 <code>planId + reviseChapter</code> 重修某章。
+          报告自动写入工作区 <code>reports/</code> 目录。
         </div>
       </div>
     </div>
@@ -304,7 +312,9 @@ const STYLE = `
 .drt-run-head { display:flex; align-items:center; gap:8px; min-width:0; }
 .drt-run-dot { width:8px; height:8px; border-radius:50%; background:#98a2b3; flex:none; }
 .drt-run-dot--live { background:#315bff; animation:drt-pulse 1.6s ease-in-out infinite; }
+.drt-run-dot--paused { background:#f79009; }
 .drt-run-dot--err { background:#d92d20; }
+.drt-run--paused { border-color:rgba(247,144,9,.45); box-shadow:0 0 0 1px rgba(247,144,9,.18); }
 @keyframes drt-pulse { 0%,100% { opacity:1; } 50% { opacity:.35; } }
 .drt-run-topic { font-size:13px; font-weight:650; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .drt-run-mode { flex:none; padding:2px 7px; border-radius:999px; background:rgba(49,91,255,.09); color:#315bff; font-size:10px; font-weight:700; }

@@ -24,6 +24,8 @@ export interface ChapterState {
   carryOverWarnings: string[]
   /** 本章新增来源（来源池增量）. */
   newSources: string[]
+  /** 谭溯源章末「本章小结（≤100字）」，串行模式下传给后续章节（原协议「已完成章节摘要」）. */
+  summary?: string
 }
 
 export interface ResearchCard {
@@ -54,6 +56,8 @@ export interface ResearchCard {
   }
   /** Phase 5: 傅梓铭最终报告. */
   finalReport?: string
+  /** 跨阶段全局警告（初调降级/来源不足等），最终汇入「待完善事项」. */
+  globalWarnings: string[]
   /** Progress log lines (进度通报). */
   log: string[]
 }
@@ -70,13 +74,18 @@ export function createCard(input: {
   outputFormat: OutputFormat
   language: string
   extraConstraints?: string
+  /** full 模式章节数上限（插件配置 maxChapters），quick/single 固定 3/1. */
+  maxChapters?: number
 }): ResearchCard {
-  const maxSections = input.mode === 'full' ? 5 : input.mode === 'quick' ? 3 : 1
+  const maxSections = input.mode === 'full'
+    ? Math.min(10, Math.max(1, input.maxChapters ?? 5))
+    : input.mode === 'quick' ? 3 : 1
   return {
     ...input,
     maxSections,
     sourcePool: [],
     sections: [],
+    globalWarnings: [],
     log: [],
   }
 }
@@ -107,6 +116,12 @@ export function cardDigest(card: ResearchCard): string {
       if (s.draft) flags.push(`已有草稿(${s.draft.length}字)`)
       lines.push(`  ${s.index}. ${s.title}${flags.length ? ` [${flags.join(', ')}]` : ''}`)
     }
+  }
+  // 已完成章节摘要（≤100字/章）：串行模式下后续章节与审稿/框架阶段据此保持跨章上下文。
+  const summarized = card.sections.filter((s) => s.summary)
+  if (summarized.length > 0) {
+    lines.push(`\n【已完成章节摘要】`)
+    for (const s of summarized) lines.push(`  第${s.index}章 ${s.title}：${s.summary}`)
   }
   return lines.join('\n')
 }

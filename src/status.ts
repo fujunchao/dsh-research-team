@@ -30,10 +30,12 @@ export interface RunStatus {
   runId: string
   topic: string
   mode: string
+  /** Run shape: 'pipeline' = deep_research 全流水线（缺省），'action' = research_member 单动作直调. */
+  kind?: 'pipeline' | 'action'
   startedAt: number
   updatedAt: number
-  /** 'running' | 'done' | 'error'. */
-  state: 'running' | 'done' | 'error'
+  /** 'running' | 'paused' | 'done' | 'error'. paused = 等待用户确认大纲. */
+  state: 'running' | 'paused' | 'done' | 'error'
   /** 0-5 phase number (0 = 立项中). */
   phase: number
   /** Human progress line (latest progress callback text). */
@@ -62,25 +64,26 @@ const runs = new Map<string, RunStatus>()
 
 function prune(): void {
   const all = [...runs.values()].sort((a, b) => b.startedAt - a.startedAt)
-  const settled = all.filter((r) => r.state !== 'running')
+  const settled = all.filter((r) => r.state !== 'running' && r.state !== 'paused')
   for (const r of settled.slice(MAX_SETTLED)) runs.delete(r.runId)
 }
 
 export function snapshot(): StatusSnapshot {
-  const live = [...runs.values()].filter((r) => r.state === 'running')
-  const settled = [...runs.values()].filter((r) => r.state !== 'running')
+  const live = [...runs.values()].filter((r) => r.state === 'running' || r.state === 'paused')
+  const settled = [...runs.values()].filter((r) => r.state !== 'running' && r.state !== 'paused')
     .sort((a, b) => b.startedAt - a.startedAt)
     .slice(0, MAX_SETTLED)
   return { runs: [...live, ...settled] }
 }
 
 /** Create a new run entry; prunes old settled runs. Returns the run handle. */
-export function startRun(runId: string, topic: string, mode: string): RunStatus {
+export function startRun(runId: string, topic: string, mode: string, kind: 'pipeline' | 'action' = 'pipeline'): RunStatus {
   const now = Date.now()
   const run: RunStatus = {
     runId,
     topic,
     mode,
+    kind,
     startedAt: now,
     updatedAt: now,
     state: 'running',
@@ -126,6 +129,20 @@ export function memberSettled(run: RunStatus, label: string, outcome: MemberActi
 /** Replace the chapter progress table (called on phase transitions). */
 export function setChapters(run: RunStatus, chapters: ChapterProgress[]): void {
   run.chapters = chapters
+  run.updatedAt = Date.now()
+}
+
+/** Pause a run (full-mode pipeline awaiting the user's outline confirmation). */
+export function pauseRun(run: RunStatus, headline: string): void {
+  run.state = 'paused'
+  run.headline = headline
+  run.log.push(`[${new Date().toISOString().slice(11, 19)}] ${headline}`)
+  run.updatedAt = Date.now()
+}
+
+/** Resume a paused run (outline confirmed / feedback round starting). */
+export function resumeRun(run: RunStatus): void {
+  run.state = 'running'
   run.updatedAt = Date.now()
 }
 

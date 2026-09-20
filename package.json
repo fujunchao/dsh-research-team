@@ -1,6 +1,6 @@
 {
   "name": "@dsh-external/dsh-research-team",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "深度研究专家团：主理人+6专家 5阶段编排（初调→大纲→逐章审稿修订→框架→发布），产出多源引用研究报告。移植自 WorkBuddy gpt-researcher-team 专家团协议",
   "private": true,
   "type": "module",

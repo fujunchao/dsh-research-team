@@ -87,18 +87,21 @@ export function extractJson(text: string): unknown {
   throw new Error('no parseable JSON object in member output')
 }
 
-/** Default per-member wall-clock budget (the 原协议 超时降级表's outer bound). */
-const DEFAULT_MEMBER_TIMEOUT_MS = 10 * 60 * 1000
+/** Default per-member wall-clock budgets, scaled from the 原协议 maxTurns
+ * table (topic-researcher 80 vs the others 20-30): the researcher does real
+ * multi-source web work and needs the headroom; schema-bound roles are quick. */
+const ROLE_BUDGETS_MS: Record<RoleId, number> = {
+  'topic-researcher': 15 * 60 * 1000,
+  'research-planner': 5 * 60 * 1000,
+  'draft-reviewer': 6 * 60 * 1000,
+  'draft-reviser': 8 * 60 * 1000,
+  'report-writer': 8 * 60 * 1000,
+  'report-publisher': 8 * 60 * 1000,
+  'research-chief-editor': 10 * 60 * 1000,
+}
 
-/**
- * Spawn one member as a one-shot child of `parent`.
- * `task` is the 研究参数卡 + phase-specific assignment text.
- * A member that exceeds its wall-clock budget settles as
- * `stopReason: 'timeout'` (the caller's degradation table decides what
- * happens next); the underlying run is disposed so a stuck request cannot
- * hold the whole pipeline forever.
- */
-export async function dispatchMember(ctx: AppContext, opts: DispatchOpts): Promise<DispatchResult> {
+/** One dispatch attempt (no retry). */
+async function dispatchOnce(ctx: AppContext, opts: DispatchOpts, budgetMs: number): Promise<DispatchResult> {
   const persona = personaFor(opts.role) + (opts.forceJson ? JSON_NOTE : '')
   const run = await ctx.subagents.start('spawn', {
     label: opts.label,
@@ -108,7 +111,6 @@ export async function dispatchMember(ctx: AppContext, opts: DispatchOpts): Promi
     persona,
     ...(opts.outputSchema ? { outputSchema: opts.outputSchema } : {}),
   })
-  const budgetMs = opts.timeoutMs === 0 ? Number.POSITIVE_INFINITY : (opts.timeoutMs ?? DEFAULT_MEMBER_TIMEOUT_MS)
   let timer: ReturnType<typeof setTimeout> | undefined
   const timedOut = new Promise<'timeout'>((resolve) => {
     if (Number.isFinite(budgetMs)) timer = setTimeout(() => resolve('timeout'), budgetMs)
@@ -135,4 +137,36 @@ export async function dispatchMember(ctx: AppContext, opts: DispatchOpts): Promi
     if (timer !== undefined) clearTimeout(timer)
     void run.dispose().catch(() => {})
   }
+}
+
+/**
+ * Spawn one member as a one-shot child of `parent`, with the 兜底表's
+ * dispatch-failure rule: an errored spawn settles after ONE retry (timeout
+ * does not retry — the wall-clock budget is already spent).
+ * `task` is the 研究参数卡 + phase-specific assignment text.
+ * A member that exceeds its wall-clock budget settles as
+ * `stopReason: 'timeout'` (the caller's degradation table decides what
+ * happens next); the underlying run is disposed so a stuck request cannot
+ * hold the whole pipeline forever.
+ */
+export async function dispatchMember(ctx: AppContext, opts: DispatchOpts): Promise<DispatchResult> {
+  const budgetMs = opts.timeoutMs === 0
+    ? Number.POSITIVE_INFINITY
+    : (opts.timeoutMs ?? ROLE_BUDGETS_MS[opts.role])
+  const first = await dispatchOnce(ctx, opts, budgetMs).catch((e: unknown) => ({
+    ok: false,
+    text: '',
+    stopReason: 'error',
+    diagnostic: e instanceof Error ? e.message : String(e),
+  }))
+  if (first.ok || first.stopReason === 'timeout') return first
+  // 调度失败重试 1 次（原协议兜底表第一行）
+  const second = await dispatchOnce(ctx, opts, budgetMs).catch((e: unknown) => ({
+    ok: false,
+    text: '',
+    stopReason: 'error',
+    diagnostic: e instanceof Error ? e.message : String(e),
+  }))
+  if (second.ok || second.stopReason !== first.stopReason || second.diagnostic !== first.diagnostic) return second
+  return { ...second, diagnostic: `${second.diagnostic ?? 'dispatch failed'}（已重试 1 次仍失败）` }
 }
