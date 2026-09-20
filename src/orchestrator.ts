@@ -418,6 +418,10 @@ export async function executePhases(
           const splitAt = revisedText.search(/^---\s*$/m)
           s.draft = splitAt > 0 ? revisedText.slice(0, splitAt).trim() : revisedText
           s.revisionNote = splitAt > 0 ? revisedText.slice(splitAt).trim() : ''
+          // 修订后内联引用达标 → 清掉调研阶段记下的过期「来源不足」警告
+          if (countDistinctUrls(s.draft) >= MIN_CHAPTER_SOURCES) {
+            s.carryOverWarnings = s.carryOverWarnings.filter((w) => !w.includes('本章来源仅'))
+          }
         } catch (e) {
           // 降级：保留修订前版本为最终稿（原协议降级表）
           s.carryOverWarnings.push(`修订失败（${e instanceof Error ? e.message : String(e)}），以修订前版本为准`)
@@ -628,6 +632,10 @@ export async function reviseChapter(
       const t = brief(revised, '重修修订')
       const splitAt = t.search(/^---\s*$/m)
       s.draft = splitAt > 0 ? t.slice(0, splitAt).trim() : t
+      // 修订后内联引用达标 → 清掉调研阶段记下的过期「来源不足」警告
+      if (countDistinctUrls(s.draft) >= MIN_CHAPTER_SOURCES) {
+        s.carryOverWarnings = s.carryOverWarnings.filter((w) => !w.includes('本章来源仅'))
+      }
     } catch {
       s.carryOverWarnings.push('重修修订失败，以修订前版本为准')
     }
