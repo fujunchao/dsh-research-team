@@ -1,0 +1,18 @@
+# dsh-research-team bundle patch
+#
+# Inserts the plugin row into the web profile roster. The row runs the host
+# half (exports ".") in the host process and — via the `dsh.client`
+# declaration in package.json — the browser half (exports "./client") in the
+# web GUI.
+#
+# Row config (all optional):
+#   maxChapters   cap handed to the planner prompt (default 5; mode still
+#                 wins: quick=3, single=1)
+#   reportsDir    report output dir relative to the workspace root
+#                 (default "reports")
+- insert:
+    - id: '@dsh-external/dsh-research-team'
+      name: '@dsh-external/dsh-research-team'
+      config:
+        maxChapters: 5
+        reportsDir: reports
