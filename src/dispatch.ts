@@ -34,6 +34,8 @@ export interface DispatchOpts {
   task: string
   forceJson?: boolean
   outputSchema?: Record<string, unknown>
+  /** Per-member wall-clock budget in ms (default 10 min, 0 = no timeout). */
+  timeoutMs?: number
 }
 
 export interface DispatchResult {
@@ -85,9 +87,16 @@ export function extractJson(text: string): unknown {
   throw new Error('no parseable JSON object in member output')
 }
 
+/** Default per-member wall-clock budget (the 原协议 超时降级表's outer bound). */
+const DEFAULT_MEMBER_TIMEOUT_MS = 10 * 60 * 1000
+
 /**
  * Spawn one member as a one-shot child of `parent`.
  * `task` is the 研究参数卡 + phase-specific assignment text.
+ * A member that exceeds its wall-clock budget settles as
+ * `stopReason: 'timeout'` (the caller's degradation table decides what
+ * happens next); the underlying run is disposed so a stuck request cannot
+ * hold the whole pipeline forever.
  */
 export async function dispatchMember(ctx: AppContext, opts: DispatchOpts): Promise<DispatchResult> {
   const persona = personaFor(opts.role) + (opts.forceJson ? JSON_NOTE : '')
@@ -99,7 +108,17 @@ export async function dispatchMember(ctx: AppContext, opts: DispatchOpts): Promi
     persona,
     ...(opts.outputSchema ? { outputSchema: opts.outputSchema } : {}),
   })
+  const budgetMs = opts.timeoutMs === 0 ? Number.POSITIVE_INFINITY : (opts.timeoutMs ?? DEFAULT_MEMBER_TIMEOUT_MS)
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timedOut = new Promise<'timeout'>((resolve) => {
+    if (Number.isFinite(budgetMs)) timer = setTimeout(() => resolve('timeout'), budgetMs)
+  })
   try {
+    const settled = await Promise.race([run.result.then(() => 'done' as const), timedOut])
+    if (settled === 'timeout') {
+      void run.dispose().catch(() => {})
+      return { ok: false, text: '', stopReason: 'timeout', diagnostic: `成员 ${opts.label} 超过 ${Math.round(budgetMs / 60000)} 分钟预算，按超时降级处理` }
+    }
     const result = await run.result
     const text = result.output
       .map((b) => (b && typeof b === 'object' && 'text' in b ? String((b as { text: unknown }).text) : ''))
@@ -113,6 +132,7 @@ export async function dispatchMember(ctx: AppContext, opts: DispatchOpts): Promi
       ...(result.diagnostic ? { diagnostic: result.diagnostic } : {}),
     }
   } finally {
+    if (timer !== undefined) clearTimeout(timer)
     void run.dispose().catch(() => {})
   }
 }

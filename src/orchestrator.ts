@@ -78,6 +78,19 @@ function harvestSourcePool(text: string): string[] {
   return out
 }
 
+/** De-duplicate source-pool lines (URL+title identical after trimming). */
+function dedupeSources(sources: string[]): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const s of sources) {
+    const key = s.trim()
+    if (!key || seen.has(key)) continue
+    seen.add(key)
+    out.push(key)
+  }
+  return out
+}
+
 export async function runResearch(
   ctx: AppContext,
   card: ResearchCard,
@@ -220,18 +233,28 @@ export async function runResearch(
     .map((s) => `\n## 第 ${s.index} 章：${s.title}\n\n${s.draft ?? '【本章调研失败，仅有大纲要点】'}`)
     .join('\n')
   const frameTask = `${cardDigest(card)}\n\n【各章节正文（已通过审稿）】\n${chaptersBody}\n\n请按你的 4 步任务产出 JSON：table_of_contents / introduction / conclusion / sources（APA 去重排序，目标 ≥20 来源）。`
+  let frame: NonNullable<ResearchCard['frame']>
+  let frameDegraded = false
   const frameRaw = await D('report-writer', '程文成·报告框架', frameTask, {
     forceJson: true,
     outputSchema: FRAME_SCHEMA,
   })
-  let frame: ResearchCard['frame']
   try {
-    frame = (frameRaw.structured ?? extractJson(frameRaw.text)) as NonNullable<typeof frame>
-  } catch {
-    throw new Error('Phase 4 框架 JSON 解析失败：' + frameRaw.text.slice(0, 300))
+    if (!frameRaw.ok && !frameRaw.text) throw new Error(frameRaw.diagnostic ?? frameRaw.stopReason)
+    frame = (frameRaw.structured ?? extractJson(frameRaw.text)) as typeof frame
+  } catch (e) {
+    // 超时降级：简易占位框架（目录=大纲、引言/结论占位、参考文献=来源池），Phase 5 继续
+    frameDegraded = true
+    progress(`⚠️ Phase 4 降级 — 程文成未正常完成（${e instanceof Error ? e.message.slice(0, 120) : String(e)}），使用占位框架`)
+    frame = {
+      table_of_contents: card.sections.map((s) => `${s.index}. ${s.title}`).join('\n'),
+      introduction: `本报告围绕「${card.topic}」展开${card.mode === 'single' ? '专项' : '系统性'}研究，共 ${card.sections.length} 章。（程文成阶段超时降级，引言待补）`,
+      conclusion: `本报告完成了「${card.topic}」的多源调研与审稿流程。（程文成阶段超时降级，结论待补）`,
+      sources: dedupeSources(card.sourcePool),
+    }
   }
   card.frame = frame
-  progress(`✅ Phase 4 完成 — 引言 ${frame.introduction.length} 字 / 结论 ${frame.conclusion.length} 字 / 参考 ${frame.sources.length} 条`)
+  progress(`✅ Phase 4 完成${frameDegraded ? '（降级）' : ''} — 引言 ${frame.introduction.length} 字 / 结论 ${frame.conclusion.length} 字 / 参考 ${frame.sources.length} 条`)
 
   // ───────────────────────── Phase 5: 发布输出（傅梓铭） ─────────────────────
   progress(`▶ Phase 5/5 发布输出 — 傅梓铭 (report-publisher)`)
@@ -249,7 +272,32 @@ export async function runResearch(
     allWarnings.length > 0 ? `\n【审稿警告清单（汇总到「待完善事项」区）】\n${allWarnings.join('\n')}` : '',
     `\n请执行整合 + Final QA，回传完整 Markdown 报告（${card.outputFormat === 'html' ? '并额外附自包含 HTML 版本' : 'markdown 格式'}）。`,
   ].join('\n')
-  const published = brief(await D('report-publisher', '傅梓铭·发布输出', publishTask), 'Phase 5 发布')
+  const published = await D('report-publisher', '傅梓铭·发布输出', publishTask)
+    .then((r) => brief(r, 'Phase 5 发布'))
+    .catch((e: unknown) => {
+      // 超时降级：主编排器直接拼装最小可用报告，保证产物落盘
+      progress(`⚠️ Phase 5 降级 — 傅梓铭未正常完成（${e instanceof Error ? e.message.slice(0, 120) : String(e)}），编排器代为拼装`)
+      return [
+        `# ${card.title ?? card.topic}`,
+        '',
+        `> 深度研究专家团报告（${nowDate()}）· 发布阶段超时降级拼装`,
+        '',
+        frame.table_of_contents,
+        '',
+        '## 引言',
+        frame.introduction,
+        '',
+        chaptersBody,
+        '',
+        '## 结论',
+        frame.conclusion,
+        '',
+        '## 参考文献',
+        ...frame.sources,
+        '',
+        ...(allWarnings.length > 0 ? ['## 待完善事项', ...allWarnings, ''] : []),
+      ].join('\n')
+    })
   card.finalReport = published
   progress(`✅ Phase 5 完成 — 最终报告 ${published.length} 字`)
   progress(`🏁 深度研究《${card.title}》全部阶段完成`)
