@@ -37,6 +37,8 @@ export interface ResearchCard {
   outputFormat: OutputFormat
   language: string
   maxSections: number
+  /** 季要纲判定的章节独立性：true=可并行调研，false=有依赖需串行；undefined=未判定（回退 >5 章规则）. */
+  parallelChapters?: boolean
   /** 用户补充约束. */
   extraConstraints?: string
 

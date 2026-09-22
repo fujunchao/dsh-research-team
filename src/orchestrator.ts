@@ -46,8 +46,10 @@ const OUTLINE_SCHEMA = {
     date: { type: 'string' },
     sections: { type: 'array', items: { type: 'string' } },
     rationale: { type: 'string' },
+    /** 季要纲判定的章节独立性（原版协议中主理人的并行判断，由大纲产出者承担）. */
+    parallel: { type: 'boolean' },
   },
-  required: ['title', 'date', 'sections', 'rationale'],
+  required: ['title', 'date', 'sections', 'rationale', 'parallel'],
   additionalProperties: false,
 }
 
@@ -272,18 +274,18 @@ export async function runResearch(
     // 断点自检：已有大纲（上次 run 已确认/已产出）则跳过；带反馈则重新规划
     P(2, `▶ Phase 2/5 大纲规划 — 季要纲 (research-planner)${opts?.outlineFeedback ? '（按用户反馈修订大纲）' : ''}`)
     const feedbackNote = opts?.outlineFeedback ? `\n\n【用户对上一版大纲的反馈（必须吸收）】\n${opts.outlineFeedback}` : ''
-    const outlineTask = `${cardDigest(card)}${feedbackNote}\n\n请基于 Phase 1 初调摘要${opts?.outlineFeedback ? '和用户反馈' : ''}规划报告章节大纲。max_sections=${card.maxSections}。输出 JSON（title/date/sections/rationale）。`
+    const outlineTask = `${cardDigest(card)}${feedbackNote}\n\n请基于 Phase 1 初调摘要${opts?.outlineFeedback ? '和用户反馈' : ''}规划报告章节大纲。max_sections=${card.maxSections}。同时判定章节独立性：若各章主题彼此独立、无需前后文传递（如并列的维度/方案/市场），parallel=true（并行调研，更快）；若存在递进/依赖关系需要上一章结论，parallel=false（串行调研，跨章上下文传递）。输出 JSON（title/date/sections/rationale/parallel）。`
     const outlineRaw = await D('research-planner', '季要纲·大纲规划', outlineTask, {
       forceJson: true,
       outputSchema: OUTLINE_SCHEMA,
     })
-    let outline: { title: string; sections: string[] }
+    let outline: { title: string; sections: string[]; parallel?: boolean }
     try {
-      const parsed = (outlineRaw.structured ?? extractJson(outlineRaw.text)) as { title: string; sections: string[] }
+      const parsed = (outlineRaw.structured ?? extractJson(outlineRaw.text)) as { title: string; sections: string[]; parallel?: boolean }
       if (!parsed?.title || !Array.isArray(parsed.sections) || parsed.sections.length === 0) throw new Error('empty outline')
       outline = parsed
     } catch {
-      // 降级：编排器基于初调摘要生成简化 3 章占位大纲（原协议降级表）
+      // 降级：编排器基于初调摘要生成简化 3 章占位大纲（原协议降级表）；独立性未判定
       P(2, `⚠️ Phase 2 降级 — 季要纲未正常完成（${(outlineRaw.diagnostic ?? outlineRaw.text.slice(0, 80)).slice(0, 120)}），使用 3 章占位大纲`)
       outline = {
         title: card.topic,
@@ -291,6 +293,7 @@ export async function runResearch(
       }
     }
     card.title = outline.title
+    if (typeof outline.parallel === 'boolean') card.parallelChapters = outline.parallel
     card.sections = outline.sections.slice(0, card.maxSections).map((t, i) => ({
       index: i + 1,
       title: t,
@@ -298,7 +301,7 @@ export async function runResearch(
       carryOverWarnings: [],
       newSources: [],
     }))
-    P(2, `✅ Phase 2 完成 — 《${card.title}》共 ${card.sections.length} 章：${card.sections.map((s) => s.title).join(' / ')}`)
+    P(2, `✅ Phase 2 完成 — 《${card.title}》共 ${card.sections.length} 章${card.parallelChapters !== undefined ? `（季要纲判定：${card.parallelChapters ? '章节独立，可并行调研' : '章节有依赖，串行调研'}）` : ''}：${card.sections.map((s) => s.title).join(' / ')}`)
     syncChapters(() => ({}))
     opts?.onCheckpoint?.()
 
@@ -365,14 +368,20 @@ export async function executePhases(
     opts?.onCheckpoint?.()
   }
 
-  if (card.sections.length > SERIAL_MAX_SECTIONS) {
-    // >5 章：并行（原协议「并行加速」），跨章一致性风险提示；断点命中的章直接跳过
+  // 调度判定（原版协议的主理人判断，由季要纲落在大纲上）：
+  // parallelChapters=true → 并行；false → 串行；未判定（旧 checkpoint/降级大纲）→ 回退 >5 章阈值
+  const parallel = card.parallelChapters === true
+    || (card.parallelChapters === undefined && card.sections.length > SERIAL_MAX_SECTIONS)
+
+  if (parallel) {
+    // 并行调研（原协议「并行加速」），跨章一致性风险提示；断点命中的章直接跳过
     const pending = card.sections.filter((s) => !chapterDone(s))
     for (const s of card.sections.filter(chapterDone)) {
       P(3, `⏭️ 第 ${s.index} 章断点命中（${quick ? '草稿已存在' : '已 PASS'}），跳过调研`)
     }
     if (pending.length > 0) {
-      P(3, `⚡ ${card.sections.length} 章 > ${SERIAL_MAX_SECTIONS}，对未完成 ${pending.length} 章并行调研（跨章一致性风险增加，全部共享同一张研究参数卡）`)
+      const why = card.parallelChapters === true ? '季要纲判定：章节彼此独立' : `${card.sections.length} 章 > ${SERIAL_MAX_SECTIONS}`
+      P(3, `⚡ ${why}，对未完成 ${pending.length} 章并行调研（跨章一致性风险增加，全部共享同一张研究参数卡）`)
       const settled = await Promise.allSettled(pending.map((s) => dispatchChapter(s)))
       const interrupted = settled.find((r) => r.status === 'rejected' && r.reason instanceof ResearchInterrupted)
       if (interrupted) throw (interrupted as PromiseRejectedResult).reason
@@ -381,7 +390,7 @@ export async function executePhases(
       }
     }
   } else {
-    // ≤5 章：串行——每章完成后小结+新来源随参数卡流入下一章（原协议默认）；断点命中的章跳过
+    // 串行——每章完成后小结+新来源随参数卡流入下一章（原协议默认）；断点命中的章跳过
     for (const s of card.sections) {
       if (chapterDone(s)) {
         P(3, `⏭️ 第 ${s.index} 章断点命中（${quick ? '草稿已存在' : '已 PASS'}），跳过调研`)

@@ -244,7 +244,7 @@ function Panel(): ReactElement {
       <div className="drt-section">
         <h3>🔄 三工作流</h3>
         <div className="drt-phases">
-          <div className="drt-phase"><i>A</i><div>完整 full（默认）<small>初调 → 大纲 → <b>用户确认</b> → 逐章调研→审稿→修订（≤3 轮）→ 框架 → 发布。≤5 章串行调度（章节小结+来源池逐章传递），&gt;5 章并行。</small></div></div>
+          <div className="drt-phase"><i>A</i><div>完整 full（默认）<small>初调 → 大纲（含并行/串行判定）→ <b>用户确认</b> → 逐章调研→审稿→修订（≤3 轮）→ 框架 → 发布。章节独立则并行调研，有依赖则串行（小结+来源池逐章传递）。</small></div></div>
           <div className="drt-phase"><i>B</i><div>快速 quick<small>3 章、跳过审稿修订、免大纲确认，报告顶部标注「未经审稿」。要速度选它。</small></div></div>
           <div className="drt-phase"><i>C</i><div>单章 single<small>收窄范围只深研一个子课题，走完整审稿循环，直接输出单章报告（无引言/结论）。</small></div></div>
         </div>
