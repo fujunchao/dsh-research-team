@@ -9,7 +9,7 @@
 import type { ResearchCard } from './card.js'
 
 /** Plan lifecycle, mirrored on the card between tool calls. */
-export type PlanStage = 'planning' | 'awaiting-confirm' | 'executing' | 'done' | 'error'
+export type PlanStage = 'planning' | 'awaiting-confirm' | 'executing' | 'interrupted' | 'done' | 'error'
 
 export interface PlanEntry {
   planId: string

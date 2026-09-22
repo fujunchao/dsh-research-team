@@ -78,6 +78,30 @@ const REVIEW_SCHEMA = {
 /** Where a pipeline stopped (only full mode pauses; others run to completion). */
 export type PipelineStop = 'completed' | 'awaiting-outline-confirm'
 
+/**
+ * Thrown when the pipeline observes an aborted exec signal: the card keeps
+ * everything already produced and the run resumes from its checkpoint —
+ * unlike a member failure, an interrupt must NOT fall through the
+ * degradation table (that would overwrite finished chapters with
+ * placeholders and let the pipeline write a garbage report).
+ */
+export class ResearchInterrupted extends Error {
+  constructor(detail: string) {
+    super(`研究已中断（${detail}）。已完成的工作保留在断点中——带 planId（或同课题重新调用）即可从断点续跑，已完成章节不会重做；如需全新研究传 forceNew=true`)
+    this.name = 'ResearchInterrupted'
+  }
+}
+
+/** Shared options for every pipeline entry point. */
+export interface RunOptions {
+  /** Outline feedback from the user (planId round 2+); re-plans Phase 2. */
+  outlineFeedback?: string
+  /** Skip the outline-confirmation pause (full mode, unattended scenarios). */
+  skipConfirm?: boolean
+  /** Called after each durable milestone; the host persists the card here. */
+  onCheckpoint?: () => void
+}
+
 /** Shared dispatch/tracker plumbing for every pipeline entry point. */
 function makeRuntime(
   ctx: AppContext,
@@ -98,10 +122,14 @@ function makeRuntime(
       track?.progress(phase, line)
     },
     D: (role, label, task, opts) => {
+      // 中断感知：派发前 signal 已中止 → 直接中断（不再走降级表）
+      if (signal.aborted) throw new ResearchInterrupted(`signal 已中止，${label} 不再派出`)
       track?.member(label, 'start')
       return dispatchMember(ctx, { parent, signal, role, label: LABEL_PREFIX + label, task, ...opts })
         .then((r) => {
           track?.member(label, { settle: r.ok ? 'ok' : (r.stopReason === 'timeout' ? 'timeout' : 'error') })
+          // 成员结算时 signal 已中止（用户点了停止，子代理被级联取消）→ 中断而非降级
+          if (signal.aborted) throw new ResearchInterrupted(`${label} 执行中被中止`)
           return r
         }, (e: unknown) => {
           track?.member(label, { settle: 'error' })
@@ -205,17 +233,13 @@ export async function runResearch(
   signal: AbortSignal,
   progress: ProgressFn,
   track?: RunTracker,
-  /** Outline feedback from the user (planId round 2+); re-plans Phase 2. */
-  outlineFeedback?: string,
-  /** Start after Phase 2 (confirmed outline resume); omit for a fresh run. */
-  resumeAfterOutline?: boolean,
-  /** Skip the outline-confirmation pause (full mode, unattended scenarios). */
-  skipConfirm?: boolean,
+  opts?: RunOptions,
 ): Promise<PipelineStop> {
   const { P, D, syncChapters } = makeRuntime(ctx, card, parent, signal, progress, track)
 
   // ───────────────────────── Phase 1: 初调（谭溯源） ─────────────────────────
-  if (!resumeAfterOutline) {
+  // 断点自检：已有初调摘要（上次 run 已完成 Phase 1）则直接跳过
+  if (!card.scoutingSummary) {
     P(1, `▶ Phase 1/5 初始调研 — 谭溯源 (topic-researcher)`)
     const narrow = card.mode === 'single' ? '（单章研究：范围收窄至该子课题本身，不做全域铺开）' : ''
     const scoutTask = `模式：初步调研（Phase 1）${narrow}。\n\n${cardDigest(card)}\n\n请对上述课题执行广泛初调，按你角色定义的「模式一」产出：500-1000 字研究摘要（覆盖定义背景/主流观点与争议/关键数据/主要参与者/最新趋势，全部带真实超链接引用）+ 末尾「已收集来源池」清单（≥8-15 条）。`
@@ -235,6 +259,7 @@ export async function runResearch(
       card.globalWarnings.push(`初调来源池仅 ${card.sourcePool.length} 条（目标 ≥${MIN_POOL_SOURCES}）`)
     }
     P(1, `✅ Phase 1 完成 — 摘要 ${scoutRaw.text.length} 字，来源池 ${card.sourcePool.length} 条`)
+    opts?.onCheckpoint?.()
   }
 
   // ───────────────── Phase 2: 大纲（季要纲；single 模式跳过 → 直接单章） ─────────────────
@@ -243,10 +268,11 @@ export async function runResearch(
     card.sections = [{ index: 1, title: card.topic, reviewRound: 0, carryOverWarnings: [], newSources: [] }]
     syncChapters(() => ({}))
     P(2, `✅ 单章模式 — 跳过大纲规划，直接进入单章研究`)
-  } else if (!resumeAfterOutline || outlineFeedback) {
-    P(2, `▶ Phase 2/5 大纲规划 — 季要纲 (research-planner)${outlineFeedback ? '（按用户反馈修订大纲）' : ''}`)
-    const feedbackNote = outlineFeedback ? `\n\n【用户对上一版大纲的反馈（必须吸收）】\n${outlineFeedback}` : ''
-    const outlineTask = `${cardDigest(card)}${feedbackNote}\n\n请基于 Phase 1 初调摘要${outlineFeedback ? '和用户反馈' : ''}规划报告章节大纲。max_sections=${card.maxSections}。输出 JSON（title/date/sections/rationale）。`
+  } else if (card.sections.length === 0 || opts?.outlineFeedback) {
+    // 断点自检：已有大纲（上次 run 已确认/已产出）则跳过；带反馈则重新规划
+    P(2, `▶ Phase 2/5 大纲规划 — 季要纲 (research-planner)${opts?.outlineFeedback ? '（按用户反馈修订大纲）' : ''}`)
+    const feedbackNote = opts?.outlineFeedback ? `\n\n【用户对上一版大纲的反馈（必须吸收）】\n${opts.outlineFeedback}` : ''
+    const outlineTask = `${cardDigest(card)}${feedbackNote}\n\n请基于 Phase 1 初调摘要${opts?.outlineFeedback ? '和用户反馈' : ''}规划报告章节大纲。max_sections=${card.maxSections}。输出 JSON（title/date/sections/rationale）。`
     const outlineRaw = await D('research-planner', '季要纲·大纲规划', outlineTask, {
       forceJson: true,
       outputSchema: OUTLINE_SCHEMA,
@@ -274,15 +300,16 @@ export async function runResearch(
     }))
     P(2, `✅ Phase 2 完成 — 《${card.title}》共 ${card.sections.length} 章：${card.sections.map((s) => s.title).join(' / ')}`)
     syncChapters(() => ({}))
+    opts?.onCheckpoint?.()
 
     // full 模式在大纲确认点暂停（quick 免确认，原协议 Workflow B；
     // skipOutlineConfirm 供全自动场景一次跑完）
-    if (card.mode === 'full' && !skipConfirm) {
+    if (card.mode === 'full' && !opts?.skipConfirm) {
       return 'awaiting-outline-confirm'
     }
   }
 
-  await executePhases(ctx, card, parent, signal, progress, track)
+  await executePhases(ctx, card, parent, signal, progress, track, opts)
   return 'completed'
 }
 
@@ -297,13 +324,17 @@ export async function executePhases(
   signal: AbortSignal,
   progress: ProgressFn,
   track: RunTracker | undefined,
+  opts?: RunOptions,
 ): Promise<void> {
   const { P, D, syncChapters } = makeRuntime(ctx, card, parent, signal, progress, track)
   const quick = card.mode === 'quick'
   const single = card.mode === 'single'
+  /** 章节断点命中：已有草稿且（quick 免审稿或已 PASS）→ 无需调研。 */
+  const chapterDone = (s: ChapterState): boolean => Boolean(s.draft) && (quick || s.verdict === 'PASS')
 
-  // ───────────────────────── Phase 3: 逐章研究 ─────────────────
-  P(3, `▶ Phase 3/5 逐章研究（调研→${quick ? '（快速模式：跳过审稿）' : `审稿→修订，≤${MAX_REVIEW_ROUNDS} 轮`}）`)
+  // ───────────────────────── Phase 3: 逐章研究 ─────────────────────────
+  const resumedCount = card.sections.filter(chapterDone).length
+  P(3, `▶ Phase 3/5 逐章研究（调研→${quick ? '（快速模式：跳过审稿）' : `审稿→修订，≤${MAX_REVIEW_ROUNDS} 轮`}）${resumedCount > 0 ? `（断点续跑：${resumedCount}/${card.sections.length} 章已完成，跳过）` : ''}`)
   syncChapters(() => ({ status: undefined }))
 
   const dispatchChapter = async (s: ChapterState): Promise<void> => {
@@ -312,6 +343,7 @@ export async function executePhases(
     try {
       s.draft = brief(r, `第${s.index}章调研`)
     } catch (e) {
+      if (e instanceof ResearchInterrupted) throw e
       // 降级：占位章，警告并继续（原协议降级表）
       s.draft = undefined
       s.carryOverWarnings.push(`初稿调研失败：${e instanceof Error ? e.message : String(e)}；本章以大纲要点占位，需专家补研`)
@@ -330,15 +362,31 @@ export async function executePhases(
       P(3, `⚠️ 第 ${s.index} 章来源不足（${urls}/${MIN_CHAPTER_SOURCES}）— 已记入待完善事项`)
     }
     P(3, `✅ 第 ${s.index} 章初稿完成 — ${s.title}（新增来源 ${s.newSources.length} 条${s.summary ? '，小结已传递' : ''}）`)
+    opts?.onCheckpoint?.()
   }
 
   if (card.sections.length > SERIAL_MAX_SECTIONS) {
-    // >5 章：并行（原协议「并行加速」），跨章一致性风险提示
-    P(3, `⚡ ${card.sections.length} 章 > ${SERIAL_MAX_SECTIONS}，启用并行调研（跨章一致性风险增加，全部共享同一张研究参数卡）`)
-    await Promise.all(card.sections.map((s) => dispatchChapter(s)))
+    // >5 章：并行（原协议「并行加速」），跨章一致性风险提示；断点命中的章直接跳过
+    const pending = card.sections.filter((s) => !chapterDone(s))
+    for (const s of card.sections.filter(chapterDone)) {
+      P(3, `⏭️ 第 ${s.index} 章断点命中（${quick ? '草稿已存在' : '已 PASS'}），跳过调研`)
+    }
+    if (pending.length > 0) {
+      P(3, `⚡ ${card.sections.length} 章 > ${SERIAL_MAX_SECTIONS}，对未完成 ${pending.length} 章并行调研（跨章一致性风险增加，全部共享同一张研究参数卡）`)
+      const settled = await Promise.allSettled(pending.map((s) => dispatchChapter(s)))
+      const interrupted = settled.find((r) => r.status === 'rejected' && r.reason instanceof ResearchInterrupted)
+      if (interrupted) throw (interrupted as PromiseRejectedResult).reason
+      for (const r of settled) {
+        if (r.status === 'rejected' && !(r.reason instanceof ResearchInterrupted)) throw r.reason
+      }
+    }
   } else {
-    // ≤5 章：串行——每章完成后小结+新来源随参数卡流入下一章（原协议默认）
+    // ≤5 章：串行——每章完成后小结+新来源随参数卡流入下一章（原协议默认）；断点命中的章跳过
     for (const s of card.sections) {
+      if (chapterDone(s)) {
+        P(3, `⏭️ 第 ${s.index} 章断点命中（${quick ? '草稿已存在' : '已 PASS'}），跳过调研`)
+        continue
+      }
       syncChapters((x) => x.index === s.index ? { status: 'drafting' as const } : {})
       await dispatchChapter(s)
     }
@@ -350,9 +398,13 @@ export async function executePhases(
     P(3, `✅ Phase 3 完成（快速模式，未经审稿）— ${card.sections.length}/${card.sections.length} 章`)
     syncChapters(() => ({ status: 'pass' as const }))
   } else {
-    // 3.2 串行审稿-修订循环（跨章一致性优先，与原协议一致）
+    // 3.2 串行审稿-修订循环（跨章一致性优先，与原协议一致）；断点已 PASS 的章跳过
     for (const s of card.sections) {
       if (!s.draft) continue // 降级占位章直接进入警告区
+      if (s.verdict === 'PASS') {
+        P(3, `⏭️ 第 ${s.index} 章已通过（断点），跳过审稿`)
+        continue
+      }
       for (let round = 1; round <= MAX_REVIEW_ROUNDS; round++) {
         s.reviewRound = round
         const forced = round === MAX_REVIEW_ROUNDS
@@ -393,6 +445,7 @@ export async function executePhases(
           s.carryOverWarnings.push(...verdictJson.carry_over)
           P(3, `✅ 第 ${s.index} 章审稿通过（${round} 轮）— ${s.title}`)
           syncChapters((x) => x.index === s.index ? { status: 'pass' as const } : {})
+          opts?.onCheckpoint?.()
           break
         }
 
@@ -474,6 +527,10 @@ export async function executePhases(
   }
 
   // ───────────────────────── Phase 4: 报告框架（程文成） ─────────────────────
+  // 断点自检：已有框架（上次 run 已完成 Phase 4）则跳过
+  if (card.frame) {
+    P(4, `⏭️ Phase 4 断点命中（框架已存在），跳过程文成`)
+  } else {
   P(4, `▶ Phase 4/5 报告框架 — 程文成 (report-writer)`)
   const frameTask = `${cardDigest(card)}\n\n【各章节正文（已通过审稿）】\n${chaptersBody}\n\n请按你的 4 步任务产出 JSON：table_of_contents / introduction / conclusion / sources（APA 去重排序，目标 ≥20 来源）。`
   let frame: NonNullable<ResearchCard['frame']>
@@ -498,25 +555,35 @@ export async function executePhases(
   }
   card.frame = frame
   P(4, `✅ Phase 4 完成${frameDegraded ? '（降级）' : ''} — 引言 ${frame.introduction.length} 字 / 结论 ${frame.conclusion.length} 字 / 参考 ${frame.sources.length} 条`)
+  opts?.onCheckpoint?.()
+  }
 
   // ───────────────────────── Phase 5: 发布输出（傅梓铭） ─────────────────────
+  // 断点自检：已有最终报告（上次 run 已完成 Phase 5，仅差写盘）则跳过
+  if (card.finalReport) {
+    P(5, `⏭️ Phase 5 断点命中（最终报告已存在），跳过傅梓铭`)
+    P(5, `🏁 深度研究《${card.title}》全部阶段完成`)
+    return
+  }
   P(5, `▶ Phase 5/5 发布输出 — 傅梓铭 (report-publisher)`)
   const quickBanner = quick ? `\n> ⚠️ **本次为快速研究，未经审稿**，结论可靠性低于完整模式，重要决策请以完整模式复核。\n` : ''
   const publishTask = [
     cardDigest(card),
     `\n【报告元数据】标题：${card.title}；日期：${nowDate()}；执行模式：${card.mode}；引用格式：${card.citationFormat}`,
     quickBanner ? `\n【固定提示（置于报告顶部）】\n${quickBanner}` : '',
-    `\n【目录（程文成）】\n${frame.table_of_contents}`,
-    `\n【引言（程文成）】\n${frame.introduction}`,
+    `\n【目录（程文成）】\n${card.frame?.table_of_contents ?? ''}`,
+    `\n【引言（程文成）】\n${card.frame?.introduction ?? ''}`,
     `\n【各章节正文（已通过审稿）】\n${chaptersBody}`,
-    `\n【结论（程文成）】\n${frame.conclusion}`,
-    `\n【参考文献（程文成）】\n${frame.sources.join('\n')}`,
+    `\n【结论（程文成）】\n${card.frame?.conclusion ?? ''}`,
+    `\n【参考文献（程文成）】\n${(card.frame?.sources ?? []).join('\n')}`,
     allWarnings.length > 0 ? `\n【审稿警告清单（汇总到「待完善事项」区）】\n${allWarnings.join('\n')}` : '',
     `\n请执行整合 + Final QA，回传完整 Markdown 报告（${card.outputFormat === 'html' ? '并额外附自包含 HTML 版本' : 'markdown 格式'}）。`,
   ].join('\n')
   const published = await D('report-publisher', '傅梓铭·发布输出', publishTask)
     .then((r) => brief(r, 'Phase 5 发布'))
-    .catch(() => {
+    .catch((e: unknown) => {
+      // 中断不降级：保留断点，等待续跑
+      if (e instanceof ResearchInterrupted) throw e
       // 超时降级：主编排器直接拼装最小可用报告，保证产物落盘
       P(5, `⚠️ Phase 5 降级 — 傅梓铭未正常完成，编排器代为拼装`)
       return [
@@ -524,18 +591,18 @@ export async function executePhases(
         '',
         `> 深度研究专家团报告（${nowDate()}）· 发布阶段超时降级拼装`,
         quickBanner,
-        frame.table_of_contents,
+        card.frame?.table_of_contents ?? '',
         '',
         '## 引言',
-        frame.introduction,
+        card.frame?.introduction ?? '',
         '',
         chaptersBody,
         '',
         '## 结论',
-        frame.conclusion,
+        card.frame?.conclusion ?? '',
         '',
         '## 参考文献',
-        ...frame.sources,
+        ...(card.frame?.sources ?? []),
         '',
         ...(allWarnings.length > 0 ? ['## 待完善事项', ...allWarnings, ''] : []),
       ].join('\n')
@@ -546,6 +613,7 @@ export async function executePhases(
     ? published.replace(/^(# .*\n)/, `$1\n${bannerLine}\n`)
     : published
   P(5, `✅ Phase 5 完成 — 最终报告 ${card.finalReport.length} 字`)
+  opts?.onCheckpoint?.()
 
   // 整份报告来源总数硬校验（原协议：整份 ≥20 来源）
   const totalSources = countDistinctUrls(card.finalReport ?? '')
@@ -578,9 +646,16 @@ export async function reviseChapter(
   }
 
   P(3, `🔄 重修第 ${chapterIndex} 章「${s.title}」${chapterFeedback ? `（附加要求：${chapterFeedback}）` : ''}`)
+  // 重修语义 = 显式重做：清掉目标章状态与下游产物，绕过 executePhases 的断点跳过
   s.reviewRound = 0
   s.verdict = undefined
+  s.draft = undefined
+  s.summary = undefined
+  s.feedback = undefined
+  s.revisionNote = undefined
   s.carryOverWarnings = []
+  card.frame = undefined
+  card.finalReport = undefined
   if (chapterFeedback) {
     card.extraConstraints = [card.extraConstraints, `第${chapterIndex}章重修要求：${chapterFeedback}`].filter(Boolean).join('；')
   }
