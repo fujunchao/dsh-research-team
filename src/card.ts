@@ -20,6 +20,8 @@ export interface ChapterState {
   feedback?: string
   /** 任润泽 change log from the latest revision. */
   revisionNote?: string
+  /** true = 审稿 REVISE 已落定（feedback 待修订处理）；修订完成后清除。断点续跑据此跳过重审直接派修订. */
+  reviewPending?: boolean
   /** 第 3 轮强制通过时遗留的审稿警告. */
   carryOverWarnings: string[]
   /** 本章新增来源（来源池增量）. */

@@ -267,7 +267,10 @@ export async function runResearch(
   // ───────────────── Phase 2: 大纲（季要纲；single 模式跳过 → 直接单章） ─────────────────
   if (card.mode === 'single') {
     card.title = card.title ?? card.topic
-    card.sections = [{ index: 1, title: card.topic, reviewRound: 0, carryOverWarnings: [], newSources: [] }]
+    // 断点自检：已有单章（含草稿/审稿状态）不重建，否则会清掉 checkpoint 里的成果
+    if (card.sections.length === 0) {
+      card.sections = [{ index: 1, title: card.topic, reviewRound: 0, carryOverWarnings: [], newSources: [] }]
+    }
     syncChapters(() => ({}))
     P(2, `✅ 单章模式 — 跳过大纲规划，直接进入单章研究`)
   } else if (card.sections.length === 0 || opts?.outlineFeedback) {
@@ -332,12 +335,15 @@ export async function executePhases(
   const { P, D, syncChapters } = makeRuntime(ctx, card, parent, signal, progress, track)
   const quick = card.mode === 'quick'
   const single = card.mode === 'single'
-  /** 章节断点命中：已有草稿且（quick 免审稿或已 PASS）→ 无需调研。 */
-  const chapterDone = (s: ChapterState): boolean => Boolean(s.draft) && (quick || s.verdict === 'PASS')
+  /** 章节断点命中：已有草稿即不重调研（审稿状态由审稿循环自处理：PASS 跳过、其余进循环）。 */
+  const hasDraft = (s: ChapterState): boolean => Boolean(s.draft)
+  /** 草稿命中日志：区分“已 PASS 全跳过”与“待审稿只跳调研”。 */
+  const draftHitLine = (s: ChapterState): string =>
+    `⏭️ 第 ${s.index} 章断点命中（${quick || s.verdict === 'PASS' ? '已 PASS' : '草稿已存在，跳过调研进审稿'}），跳过调研`
 
   // ───────────────────────── Phase 3: 逐章研究 ─────────────────────────
-  const resumedCount = card.sections.filter(chapterDone).length
-  P(3, `▶ Phase 3/5 逐章研究（调研→${quick ? '（快速模式：跳过审稿）' : `审稿→修订，≤${MAX_REVIEW_ROUNDS} 轮`}）${resumedCount > 0 ? `（断点续跑：${resumedCount}/${card.sections.length} 章已完成，跳过）` : ''}`)
+  const resumedCount = card.sections.filter(hasDraft).length
+  P(3, `▶ Phase 3/5 逐章研究（调研→${quick ? '（快速模式：跳过审稿）' : `审稿→修订，≤${MAX_REVIEW_ROUNDS} 轮`}）${resumedCount > 0 ? `（断点续跑：${resumedCount}/${card.sections.length} 章已有草稿）` : ''}`)
   syncChapters(() => ({ status: undefined }))
 
   const dispatchChapter = async (s: ChapterState): Promise<void> => {
@@ -375,9 +381,9 @@ export async function executePhases(
 
   if (parallel) {
     // 并行调研（原协议「并行加速」），跨章一致性风险提示；断点命中的章直接跳过
-    const pending = card.sections.filter((s) => !chapterDone(s))
-    for (const s of card.sections.filter(chapterDone)) {
-      P(3, `⏭️ 第 ${s.index} 章断点命中（${quick ? '草稿已存在' : '已 PASS'}），跳过调研`)
+    const pending = card.sections.filter((s) => !hasDraft(s))
+    for (const s of card.sections.filter(hasDraft)) {
+      P(3, draftHitLine(s))
     }
     if (pending.length > 0) {
       const why = card.parallelChapters === true ? '季要纲判定：章节彼此独立' : `${card.sections.length} 章 > ${SERIAL_MAX_SECTIONS}`
@@ -392,8 +398,8 @@ export async function executePhases(
   } else {
     // 串行——每章完成后小结+新来源随参数卡流入下一章（原协议默认）；断点命中的章跳过
     for (const s of card.sections) {
-      if (chapterDone(s)) {
-        P(3, `⏭️ 第 ${s.index} 章断点命中（${quick ? '草稿已存在' : '已 PASS'}），跳过调研`)
+      if (hasDraft(s)) {
+        P(3, draftHitLine(s))
         continue
       }
       syncChapters((x) => x.index === s.index ? { status: 'drafting' as const } : {})
@@ -414,9 +420,16 @@ export async function executePhases(
         P(3, `⏭️ 第 ${s.index} 章已通过（断点），跳过审稿`)
         continue
       }
-      for (let round = 1; round <= MAX_REVIEW_ROUNDS; round++) {
+      // 断点续跑：reviewPending=true 表示中断前审稿 REVISE 已落定、修订未做——
+      // 从当时的轮次直接派任润泽，不浪费一次重审
+      let resumePendingRevision = s.reviewPending === true
+      for (let round = resumePendingRevision ? Math.max(1, s.reviewRound) : 1; round <= MAX_REVIEW_ROUNDS; round++) {
         s.reviewRound = round
         const forced = round === MAX_REVIEW_ROUNDS
+        if (resumePendingRevision) {
+          resumePendingRevision = false
+          P(3, `⏭️ 第 ${s.index} 章断点命中（审稿意见已落定），跳过重审直接修订`)
+        } else {
         P(3, `🔄 第 ${s.index} 章审稿 第 ${round}/${MAX_REVIEW_ROUNDS} 轮 — 明鉴秋 (draft-reviewer)${forced ? '（强制通过轮）' : ''}`)
         syncChapters((x) => x.index === s.index ? { status: 'reviewing' as const } : {})
 
@@ -451,6 +464,7 @@ export async function executePhases(
 
         if (pass) {
           s.verdict = 'PASS'
+          s.reviewPending = false
           s.carryOverWarnings.push(...verdictJson.carry_over)
           P(3, `✅ 第 ${s.index} 章审稿通过（${round} 轮）— ${s.title}`)
           syncChapters((x) => x.index === s.index ? { status: 'pass' as const } : {})
@@ -459,10 +473,13 @@ export async function executePhases(
         }
 
         s.verdict = 'REVISE'
+        s.reviewPending = true
         s.feedback = [
           ...verdictJson.must_fix.map((m, i) => `${i + 1}. [必须修改] ${m}`),
           ...verdictJson.suggestions.map((m) => `- [建议] ${m}`),
         ].join('\n')
+        opts?.onCheckpoint?.()
+        }
 
         P(3, `✏️ 第 ${s.index} 章退回修订 — 任润泽 (draft-reviser)`)
         syncChapters((x) => x.index === s.index ? { status: 'revising' as const } : {})
@@ -485,10 +502,13 @@ export async function executePhases(
             s.carryOverWarnings = s.carryOverWarnings.filter((w) => !w.includes('本章来源仅'))
           }
         } catch (e) {
+          if (e instanceof ResearchInterrupted) throw e
           // 降级：保留修订前版本为最终稿（原协议降级表）
           s.carryOverWarnings.push(`修订失败（${e instanceof Error ? e.message : String(e)}），以修订前版本为准`)
           P(3, `⚠️ 第 ${s.index} 章修订失败（降级：保留当前稿）`)
         }
+        s.reviewPending = false
+        opts?.onCheckpoint?.()
         P(3, `✅ 第 ${s.index} 章修订完成（进入复审）`)
       }
     }
@@ -662,6 +682,7 @@ export async function reviseChapter(
   s.summary = undefined
   s.feedback = undefined
   s.revisionNote = undefined
+  s.reviewPending = undefined
   s.carryOverWarnings = []
   card.frame = undefined
   card.finalReport = undefined
