@@ -11,7 +11,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 DSH_GLOBAL="${DSH_GLOBAL:-$HOME/.nvm/versions/node/v24.15.0/lib/node_modules/@deepseek-ai/dsh/node_modules}"
-PROFILE_NM="${PROFILE_NM:-$HOME/.dsh/profiles/web/node_modules}"
+PROFILE_NM="${PROFILE_NM:-$HOME/dsh-plugins/dsh-research-team/node_modules}"
 VAULT_NM="${VAULT_NM:-$HOME/dsh-plugins/dsh-session-vault/node_modules}"
 
 if [ ! -d "$PROFILE_NM/@deepseek-ai/dsh-tools" ]; then
@@ -22,6 +22,11 @@ fi
 link_pkg() {
   local link="node_modules/$1"
   local target="$2"
+  # 本插件 node_modules 已由 npm install 提供真实包时无需链接；
+  # PROFILE_NM 指向自身时链接会自删自链，必须直接跳过。
+  if [ -f "$link/package.json" ] && [ ! -L "$link" ]; then
+    return 0
+  fi
   if [ ! -e "$target" ]; then
     echo "build: dependency target missing: $target" >&2
     exit 1
@@ -41,18 +46,18 @@ link_pkg @deepseek-ai/dsh-tools                 "$PROFILE_NM/@deepseek-ai/dsh-to
 link_pkg @deepseek-ai/dsh-subagent              "$PROFILE_NM/@deepseek-ai/dsh-subagent"
 link_pkg @deepseek-ai/dsh-llm                   "$PROFILE_NM/@deepseek-ai/dsh-llm"
 # Client-side type packages.
-link_pkg @deepseek-ai/dsh-client-runtime        "$PROFILE_NM/@deepseek-ai/dsh-client-runtime"
+link_pkg @deepseek-ai/dsh-client-ui-renderer    "$PROFILE_NM/@deepseek-ai/dsh-client-ui-renderer"
 link_pkg @deepseek-ai/dsh-client-ui-slots       "$PROFILE_NM/@deepseek-ai/dsh-client-ui-slots"
 link_pkg @deepseek-ai/dsh-client-ui-settings    "$PROFILE_NM/@deepseek-ai/dsh-client-ui-settings"
 # react + node types (from the sibling vault plugin's pnpm store).
-VAULT_PNPM="$VAULT_NM/.pnpm"
+VAULT_PNPM="$PROFILE_NM"
 link_pkg react                                  "$VAULT_PNPM/react@18.3.1/node_modules/react"
 link_pkg @types/react                           "$VAULT_PNPM/@types+react@18.3.31/node_modules/@types/react"
 link_pkg csstype                                "$VAULT_PNPM/csstype@3.2.3/node_modules/csstype"
 link_pkg @types/node                            "$DSH_GLOBAL/@types/node"
 
 echo "=== Compiling src → lib (tsc) ==="
-TSC="$VAULT_NM/typescript/bin/tsc"
+TSC="$PROFILE_NM/typescript/bin/tsc"
 if [ ! -f "$TSC" ]; then
   echo "build: tsc not found at $TSC (set VAULT_NM)" >&2
   exit 1
