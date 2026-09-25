@@ -4,7 +4,7 @@
  * GET /dsh-research-team/api/status，展示每次 deep_research 的阶段进度、
  * 成员活动与章节状态灯）。
  */
-import type { SlotRegistry } from '@deepseek-ai/dsh-client-runtime/client'
+import type { SlotRegistry } from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import { useEffect, useState, type ReactElement } from 'react'
 
