@@ -91,7 +91,9 @@ export function assessDraft(text: string, opts: AssessOptions): DraftAssessment 
   if (meta) reasons.push(`含英文过程自述/元话语（如 "${meta}"）`)
 
   const ratio = cjkRatio(raw)
-  if (ratio < 0.3) reasons.push(`中文字符占比仅 ${Math.round(ratio * 100)}%（成稿必须为中文正文）`)
+  // 阈值 8%：技术课题的合法中文成稿满篇 URL 引用与英文术语，实测 CJK 仅 15-25%
+  //（2026-09-26 冒烟：一篇合格成稿 18.7% 被旧阈值 30% 误杀）；纯英文工作笔记 ≈0-5%。
+  if (ratio < 0.08) reasons.push(`中文字符占比仅 ${Math.round(ratio * 100)}%（成稿必须为中文正文）`)
 
   if (opts.kind === 'chapter') {
     if (!raw.includes('【本章小结】')) reasons.push('缺少协议产出标记【本章小结】')

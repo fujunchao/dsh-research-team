@@ -95,6 +95,16 @@ test('长中文正文但缺【本章小结】/来源清单 → 不合格', () =>
   assert.ok(r.reasons.some((x) => x.includes('【本章小结】') || x.includes('本章新增来源')), JSON.stringify(r.reasons))
 })
 
+test('引用密集的中文技术成稿（URL/英文术语多，CJK < 30% 旧阈值会误杀）→ 通过', () => {
+  const cjkPart = '本章核心论点是该模型在两条网关下的自适应思考语义并不等同，所谓档位映射本质是把输入压缩到三档刻度而非能力的等价翻译。'.repeat(3)
+  const asciiPart = '([GLM-5.3-Flash model page — Artificial Analysis cross-check with Z.AI official docs](https://docs.z.ai/guides/vlm/glm-5.3-flash?utm_source=research&utm_campaign=deep&utm_id=1234567890abcdef)) '.repeat(10)
+  const t = `## 第1章 档位机制\n\n${cjkPart}${asciiPart}\n更多交叉验证见官方与第三方托管方实现 ([Deep Thinking — Z.AI](https://docs.z.ai/guides/capabilities/thinking))。\n\n【本章小结】\n完成。\n\n## 本章新增来源\n1. [Z.AI Deep Thinking](https://docs.z.ai/guides/capabilities/thinking) — 档位定义`
+  const ratio = [...t.replace(/\s/g, '')].filter((c) => /[\u3400-\u9fff]/.test(c)).length / [...t.replace(/\s/g, '')].length
+  assert.ok(ratio < 0.3, `样本应在旧阈值误杀区间，实际 ${(ratio * 100).toFixed(1)}%`)
+  const r = assessDraft(t, { kind: 'chapter' })
+  assert.deepEqual(r.reasons, [], JSON.stringify(r.reasons))
+})
+
 test('占位符匹配先剥离链接：正文中大量 [标题](URL) 引用不误伤', () => {
   const text = `## 第1章 概述\n\n${'根据某研究 ([来源A](https://a.example.com/x))，多项交叉验证的数据显示如下，结论具备多源支撑。'.repeat(20)}\n\n【本章小结】\n完成。\n\n## 本章新增来源\n1. [来源A](https://a.example.com/x)`
   const r = assessDraft(text, { kind: 'chapter' })

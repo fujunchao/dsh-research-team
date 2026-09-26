@@ -124,8 +124,15 @@ async function dispatchOnce(ctx: AppContext, opts: DispatchOpts, budgetMs: numbe
       return { ok: false, text: '', stopReason: 'timeout', diagnostic: `成员 ${opts.label} 超过 ${Math.round(budgetMs / 60000)} 分钟预算，按超时降级处理` }
     }
     const result = await run.result
+    // 只取 text 块：result.output 可能携带 reasoning/thinking 块（英文思考过程），
+    // 拼进回传文本会稀释中文占比、引入元话语误判（2026-09-26 冒烟实证）。
     const text = result.output
-      .map((b) => (b && typeof b === 'object' && 'text' in b ? String((b as { text: unknown }).text) : ''))
+      .map((b) => {
+        if (!b || typeof b !== 'object' || !('text' in b)) return ''
+        const blk = b as { type?: string; text: unknown }
+        if (blk.type !== undefined && blk.type !== 'text') return ''
+        return String(blk.text)
+      })
       .join('')
       .trim()
     return {
