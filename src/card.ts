@@ -105,7 +105,14 @@ export function cardDigest(card: ResearchCard): string {
   lines.push(`- 语言: ${card.language}`)
   if (card.extraConstraints) lines.push(`- 用户特殊要求: ${card.extraConstraints}`)
   if (card.scoutingSummary) {
-    lines.push(`\n【Phase 1 初调摘要】\n${card.scoutingSummary}`)
+    // 初调摘要超长时截断：原协议摘要应 500-1000 字，实测模型可能输出 2 万+ 字符；
+    // 全量内联会淹没章节任务指令、放大成员输出失稳（2026-09-26 冒烟实证：摘要
+    // 28044 字符 → 章节调研两次输出英文笔记未过质量门）。
+    const MAX_SUMMARY_CHARS = 6000
+    const summary = card.scoutingSummary.length > MAX_SUMMARY_CHARS
+      ? `${card.scoutingSummary.slice(0, MAX_SUMMARY_CHARS)}\n…（初调摘要共 ${card.scoutingSummary.length} 字符，已截断至 ${MAX_SUMMARY_CHARS}；完整全文见 checkpoint）`
+      : card.scoutingSummary
+    lines.push(`\n【Phase 1 初调摘要】\n${summary}`)
   }
   if (card.sourcePool.length > 0) {
     lines.push(`\n【已收集来源池】共 ${card.sourcePool.length} 条：`)

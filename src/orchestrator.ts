@@ -281,7 +281,7 @@ export async function runResearch(
   if (!card.scoutingSummary) {
     P(1, `▶ Phase 1/5 初始调研 — 谭溯源 (topic-researcher)`)
     const narrow = card.mode === 'single' ? '（单章研究：范围收窄至该子课题本身，不做全域铺开）' : ''
-    const scoutTask = `模式：初步调研（Phase 1）${narrow}。\n\n${cardDigest(card)}\n\n请对上述课题执行广泛初调，按你角色定义的「模式一」产出：500-1000 字研究摘要（覆盖定义背景/主流观点与争议/关键数据/主要参与者/最新趋势，全部带真实超链接引用）+ 末尾「已收集来源池」清单（≥8-15 条）。`
+    const scoutTask = `模式：初步调研（Phase 1）${narrow}。\n\n${cardDigest(card)}\n\n请对上述课题执行广泛初调，按你角色定义的「模式一」产出：500-1000 字研究摘要（覆盖定义背景/主流观点与争议/关键数据/主要参与者/最新趋势，全部带真实超链接引用）+ 末尾「已收集来源池」清单（≥8-15 条）。摘要正文严格控制在 500-1000 字（来源池清单另列、不计入字数）——超长摘要会被编排器截断，后续阶段拿不到被截掉的部分。`
     const scoutRaw = await D('topic-researcher', '谭溯源·初步调研', scoutTask)
     // 超时但已有部分文本 → 采用部分结果继续（原协议降级表）；完全无文本 → 如实报错
     if (!scoutRaw.ok && !scoutRaw.text) {

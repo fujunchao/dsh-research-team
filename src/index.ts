@@ -126,6 +126,7 @@ export function apply(ctx: Context & AppContext, config: Config): void {
           reportPath: { type: 'string', required: true },
           chapters: { type: 'array', items: { type: 'string' }, required: true },
           sourceCount: { type: 'number', required: true },
+          degradedChapters: { type: 'number', required: true, description: '未产出合格成稿（质量门/调度失败降级为占位）的章数' },
           reportExcerpt: { type: 'string', required: true },
           htmlPath: { type: 'string', required: true },
           progressLog: { type: 'array', items: { type: 'string' }, required: true },
@@ -134,12 +135,15 @@ export function apply(ctx: Context & AppContext, config: Config): void {
         additionalProperties: true,
       },
       render(args, value) {
-        const v = value as { ok?: boolean; status?: string; planId?: string; title?: string; reportPath?: string; error?: string; sourceCount?: number; outline?: string[]; resumed?: boolean }
+        const v = value as { ok?: boolean; status?: string; planId?: string; title?: string; reportPath?: string; error?: string; sourceCount?: number; outline?: string[]; resumed?: boolean; degradedChapters?: number }
+        const degradedNote = (v?.degradedChapters ?? 0) > 0
+          ? `\n⚠️ ${v.degradedChapters} 章未产出合格成稿（已降级为占位，报告不完整）——建议带 planId + reviseChapter 重修后再交付`
+          : ''
         const text = !v?.ok
           ? `❌ 深度研究失败：${v?.error ?? '未知错误'}`
           : v.status === 'awaiting-outline-confirm'
             ? `📋 《${v.title ?? ''}》大纲已就绪（planId: ${v.planId ?? ''}），共 ${v.outline?.length ?? 0} 章：\n${(v.outline ?? []).join('\n')}\n请向用户展示；确认→只带 planId 再调；修改→带 planId + outlineFeedback 再调`
-            : `✅ 《${v.title ?? ''}》研究报告完成（${v.sourceCount ?? 0} 个来源${v.resumed ? '，♻️ 含断点续跑' : ''}）→ ${v.reportPath ?? ''}`
+            : `✅ 《${v.title ?? ''}》研究报告完成（${v.sourceCount ?? 0} 个来源${v.resumed ? '，♻️ 含断点续跑' : ''}）→ ${v.reportPath ?? ''}${degradedNote}`
         return [{ type: 'text', text }] satisfies ContentBlock[]
       },
     },
@@ -177,11 +181,11 @@ export function apply(ctx: Context & AppContext, config: Config): void {
           }
         }
         if (!entryMaybe) {
-          return { ok: false, status: 'error', error: `planId ${pid} 不存在（内存与磁盘 checkpoint 均未找到）`, planId: '', reportPath: '', chapters: [], sourceCount: 0, reportExcerpt: '', htmlPath: '', title: '', outline: [], message: '', progressLog: progress }
+          return { ok: false, status: 'error', error: `planId ${pid} 不存在（内存与磁盘 checkpoint 均未找到）`, planId: '', reportPath: '', chapters: [], sourceCount: 0, degradedChapters: 0, reportExcerpt: '', htmlPath: '', title: '', outline: [], message: '', progressLog: progress }
         }
         const entry = entryMaybe
         if (entry.stage === 'executing') {
-          return { ok: false, status: 'error', error: `planId ${pid} 正在执行中，请等待完成后再调用`, planId: '', reportPath: '', chapters: [], sourceCount: 0, reportExcerpt: '', htmlPath: '', title: '', outline: [], message: '', progressLog: progress }
+          return { ok: false, status: 'error', error: `planId ${pid} 正在执行中，请等待完成后再调用`, planId: '', reportPath: '', chapters: [], sourceCount: 0, degradedChapters: 0, reportExcerpt: '', htmlPath: '', title: '', outline: [], message: '', progressLog: progress }
         }
         const card = entry.card
         const saveCp = (stage: plans.PlanStage): void => {
@@ -200,7 +204,7 @@ export function apply(ctx: Context & AppContext, config: Config): void {
           // 重修章节分支（要求报告已完成）
           if (args.reviseChapter !== undefined) {
             if (entry.stage !== 'done' && entry.stage !== 'error') {
-              return { ok: false, status: 'error', error: `reviseChapter 仅适用于已完成的研究（当前 stage=${entry.stage}）`, planId: '', reportPath: '', chapters: [], sourceCount: 0, reportExcerpt: '', htmlPath: '', title: '', outline: [], message: '', progressLog: progress }
+              return { ok: false, status: 'error', error: `reviseChapter 仅适用于已完成的研究（当前 stage=${entry.stage}）`, planId: '', reportPath: '', chapters: [], sourceCount: 0, degradedChapters: 0, reportExcerpt: '', htmlPath: '', title: '', outline: [], message: '', progressLog: progress }
             }
             plans.updatePlan(entry.planId, { stage: 'executing' })
             status.resumeRun(run)
@@ -215,6 +219,7 @@ export function apply(ctx: Context & AppContext, config: Config): void {
               outline: [], message: '',
               chapters: card.sections.map((s) => `${s.index}. ${s.title}${s.carryOverWarnings.length ? '（有遗留建议）' : ''}`),
               sourceCount: new Set(card.sourcePool).size,
+              degradedChapters: card.sections.filter((s) => !s.draft).length,
               reportExcerpt: (card.finalReport ?? '').slice(0, 1500), progressLog: progress,
               htmlPath: paths.htmlPath ?? '', error: '',
             }
@@ -241,7 +246,7 @@ export function apply(ctx: Context & AppContext, config: Config): void {
                 outline: card.sections.map((s) => `${s.index}. ${s.title}`),
                 chapters: [],
                 message: '大纲已按反馈修订，请再次确认（只带 planId 调用即确认开工；可继续带 outlineFeedback 调整）',
-                reportPath: '', sourceCount: 0, reportExcerpt: '', htmlPath: '', error: '', progressLog: progress,
+                reportPath: '', sourceCount: 0, degradedChapters: 0, reportExcerpt: '', htmlPath: '', error: '', progressLog: progress,
               }
             }
           } else {
@@ -260,7 +265,7 @@ export function apply(ctx: Context & AppContext, config: Config): void {
                 title: card.title ?? card.topic,
                 outline: card.sections.map((s) => `${s.index}. ${s.title}`),
                 chapters: [],
-                message: '请确认大纲（只带 planId 调用即确认开工）', reportPath: '', sourceCount: 0, reportExcerpt: '', htmlPath: '', error: '', progressLog: progress,
+                message: '请确认大纲（只带 planId 调用即确认开工）', reportPath: '', sourceCount: 0, degradedChapters: 0, reportExcerpt: '', htmlPath: '', error: '', progressLog: progress,
               }
             }
           }
@@ -275,6 +280,7 @@ export function apply(ctx: Context & AppContext, config: Config): void {
             outline: [], message: '',
             chapters: card.sections.map((s) => `${s.index}. ${s.title}${s.carryOverWarnings.length ? '（有遗留建议）' : ''}`),
             sourceCount: new Set(card.sourcePool).size,
+            degradedChapters: card.sections.filter((s) => !s.draft).length,
             reportExcerpt: (card.finalReport ?? '').slice(0, 1500), progressLog: progress,
             htmlPath: paths.htmlPath ?? '', error: '',
           }
@@ -288,19 +294,19 @@ export function apply(ctx: Context & AppContext, config: Config): void {
             plans.updatePlan(entry.planId, { stage: 'interrupted', card })
             saveCp('interrupted')
             status.pauseRun(run, '已中断——带 planId（或同课题）再调即从断点续跑')
-            return { ok: false, status: 'interrupted', error: msg, planId: entry.planId, reportPath: '', chapters: [], sourceCount: 0, reportExcerpt: '', htmlPath: '', title: '', outline: [], message: '', progressLog: progress }
+            return { ok: false, status: 'interrupted', error: msg, planId: entry.planId, reportPath: '', chapters: [], sourceCount: 0, degradedChapters: 0, reportExcerpt: '', htmlPath: '', title: '', outline: [], message: '', progressLog: progress }
           }
           progress_(`❌ 失败：${msg}`)
           plans.updatePlan(entry.planId, { stage: 'error' })
           saveCp('error')
           status.finishRun(run, { error: msg })
-          return { ok: false, status: 'error', error: msg, planId: entry.planId, reportPath: '', chapters: [], sourceCount: 0, reportExcerpt: '', htmlPath: '', title: '', outline: [], message: '', progressLog: progress }
+          return { ok: false, status: 'error', error: msg, planId: entry.planId, reportPath: '', chapters: [], sourceCount: 0, degradedChapters: 0, reportExcerpt: '', htmlPath: '', title: '', outline: [], message: '', progressLog: progress }
         }
       }
 
       // ───────── 全新 run ─────────
       if (!args.topic) {
-        return { ok: false, status: 'error', error: '新研究必须提供 topic（或提供 planId 续跑）', planId: '', reportPath: '', chapters: [], sourceCount: 0, reportExcerpt: '', htmlPath: '', title: '', outline: [], message: '', progressLog: progress }
+        return { ok: false, status: 'error', error: '新研究必须提供 topic（或提供 planId 续跑）', planId: '', reportPath: '', chapters: [], sourceCount: 0, degradedChapters: 0, reportExcerpt: '', htmlPath: '', title: '', outline: [], message: '', progressLog: progress }
       }
       const mode = (args.mode ?? 'full') as ExecutionMode
       const timeRange = (args.timeRange ?? defaultTimeRange(args.topic)) as TimeRange
@@ -347,7 +353,7 @@ export function apply(ctx: Context & AppContext, config: Config): void {
             outline: card.sections.map((s) => `${s.index}. ${s.title}`),
             chapters: [],
             message: '大纲已产出。请向用户展示并确认：只带 planId 再次调用即确认开工；带 outlineFeedback 则按意见重新规划；也可带 reviseChapter（未来重修用）',
-            reportPath: '', sourceCount: 0, reportExcerpt: '', htmlPath: '', error: '', progressLog: progress,
+            reportPath: '', sourceCount: 0, degradedChapters: 0, reportExcerpt: '', htmlPath: '', error: '', progressLog: progress,
           }
         }
 
@@ -360,6 +366,7 @@ export function apply(ctx: Context & AppContext, config: Config): void {
           outline: [], message: '',
           chapters: card.sections.map((s) => `${s.index}. ${s.title}${s.carryOverWarnings.length ? '（有遗留建议）' : ''}`),
           sourceCount: new Set(card.sourcePool).size,
+          degradedChapters: card.sections.filter((s) => !s.draft).length,
           reportExcerpt: (card.finalReport ?? '').slice(0, 1500), progressLog: progress,
           htmlPath: paths.htmlPath ?? '', error: '',
         }
@@ -377,13 +384,13 @@ export function apply(ctx: Context & AppContext, config: Config): void {
           plans.updatePlan(planId, { stage: 'interrupted', card })
           saveCp('interrupted')
           status.pauseRun(run, '已中断——带 planId（或同课题）再调即从断点续跑')
-          return { ok: false, status: 'interrupted', error: msg, planId, reportPath: '', chapters: [], sourceCount: 0, reportExcerpt: '', htmlPath: '', title: '', outline: [], message: '', progressLog: progress }
+          return { ok: false, status: 'interrupted', error: msg, planId, reportPath: '', chapters: [], sourceCount: 0, degradedChapters: 0, reportExcerpt: '', htmlPath: '', title: '', outline: [], message: '', progressLog: progress }
         }
         progress_(`❌ 失败：${msg}`)
         plans.updatePlan(planId, { stage: 'error' })
         saveCp('error')
         status.finishRun(run, { error: msg })
-        return { ok: false, status: 'error', error: msg, planId, reportPath: '', chapters: [], sourceCount: 0, reportExcerpt: '', htmlPath: '', title: '', outline: [], message: '', progressLog: progress }
+        return { ok: false, status: 'error', error: msg, planId, reportPath: '', chapters: [], sourceCount: 0, degradedChapters: 0, reportExcerpt: '', htmlPath: '', title: '', outline: [], message: '', progressLog: progress }
       }
     },
   })))
