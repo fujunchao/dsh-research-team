@@ -19,6 +19,8 @@ import { dispatchMember, extractJson, type AppContext, type DispatchOpts, type D
 import type { ChapterState, ResearchCard } from './card.js'
 import { cardDigest, nowDate } from './card.js'
 import { assessDraft, type DraftKind } from './assess.js'
+import { readdir, readFile, stat } from 'node:fs/promises'
+import { join } from 'node:path'
 import * as status from './status.js'
 
 export type ProgressFn = (line: string) => void
@@ -105,6 +107,9 @@ export interface RunOptions {
   skipConfirm?: boolean
   /** Called after each durable milestone; the host persists the card here. */
   onCheckpoint?: () => void
+  /** Workspace root — enables the workspace rescue path when a member writes
+   * its draft into a file instead of returning it inline. */
+  wsRoot?: string
 }
 
 /** Shared dispatch/tracker plumbing for every pipeline entry point. */
@@ -163,6 +168,56 @@ function brief(r: DispatchResult, who: string): string {
 }
 
 /**
+ * 工作区成稿抢救：成员（glm-5.3-flash 实证常态，火影 run + 两轮冒烟均如此）常把
+ * 成稿写进工作区文件，而最终输出只回传元话语前言——火影 run 的审稿人/发布员就是
+ * 靠手动读文件救回的。质量门拦截后扫描 sinceMs 之后修改的最新 .md（工作区根 +
+ * reports/ 两层），内容过成稿质量门则采纳为产出；否则返回 undefined 走原降级路径。
+ */
+async function rescueDraftFromWorkspace(
+  wsRoot: string,
+  sinceMs: number,
+  gate: { kind: DraftKind; minChars: number },
+): Promise<string | undefined> {
+  try {
+    const dirs = [wsRoot, join(wsRoot, 'reports')]
+    let best: { path: string; mtimeMs: number } | undefined
+    for (const dir of dirs) {
+      const entries = await readdir(dir, { withFileTypes: true }).catch(() => [])
+      for (const e of entries) {
+        if (!e.isFile() || !e.name.endsWith('.md')) continue
+        const p = join(dir, e.name)
+        const st = await stat(p).catch(() => undefined)
+        if (!st || st.mtimeMs < sinceMs) continue
+        if (!best || st.mtimeMs > best.mtimeMs) best = { path: p, mtimeMs: st.mtimeMs }
+      }
+    }
+    if (!best) return undefined
+    const text = await readFile(best.path, 'utf8')
+    if (!assessDraft(text, gate).ok) return undefined
+    return text
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * 质量门失败后的统一抢救包装：stopReason=quality-gate 且给了 wsRoot 时，
+ * 尝试从工作区文件恢复成稿；成功则返回合成的成功结果（stopReason='rescued-from-workspace'）。
+ */
+async function rescueIfGated(
+  r: DispatchResult,
+  wsRoot: string | undefined,
+  sinceMs: number,
+  gate: { kind: DraftKind; minChars: number },
+): Promise<DispatchResult> {
+  if (!r.ok && r.stopReason === 'quality-gate' && wsRoot) {
+    const rescued = await rescueDraftFromWorkspace(wsRoot, sinceMs, gate)
+    if (rescued !== undefined) return { ok: true, text: rescued, stopReason: 'rescued-from-workspace' }
+  }
+  return r
+}
+
+/**
  * 派发成员并过成稿质量门：产出若是占位骨架/工作笔记/元话语而非成稿，
  * 附重派原因再派一次；仍不过门则以 ok:false（stopReason='quality-gate'）返回，
  * 由调用方走各自降级路径。派发本身的单次重试与中断感知语义由 D（dispatchMember）保持。
@@ -180,7 +235,8 @@ async function dispatchWithGate(
   let verdict = assessDraft(r.ok ? r.text : '', gate)
   if (r.ok && !verdict.ok) {
     P(3, `⚠️ ${label} 产出未过成稿质量门（${verdict.reasons.slice(0, 2).join('；')}）— 重派一次`)
-    const retryTask = `${task}\n\n【重派警告】上一次最终输出被判定为"非成稿"：${verdict.reasons.join('；')}。\n【硬性要求】最终输出必须内联完整成稿全文${gate.kind === 'chapter' ? '（从「## 第 N 章」标题行开始、含数据表格，以「本章新增来源」清单与【本章小结】结束）' : '（Part 1 完整修订稿 + Part 2 修改说明，以 --- 分隔）'}；全程中文；禁止英文过程自述（I'll / Let me / JACKPOT / Word count 等）、写作计划与占位符（[N paragraphs]、[≤100字] 等）；严禁把正文写入工作区文件后只回传路径或"以下为全文"式引导句——编排器只取你的最终输出文本。`
+    // 重派要求前置到任务最前（长任务卡会淹没尾部指令，2026-09-26 冒烟实证）。
+    const retryTask = `【重派硬性要求（最高优先级，先读这段再干活）】上一次你的最终输出被判定为"非成稿"：${verdict.reasons.join('；')}。本次必须：\n1. 最终输出文本 = 完整成稿全文${gate.kind === 'chapter' ? '（从「## 第 N 章」标题行开始、含数据表格，以「本章新增来源」清单与【本章小结】结束）' : '（Part 1 完整修订稿 + Part 2 修改说明，以 --- 分隔）'}；\n2. 全程中文；\n3. 禁止使用任何写文件/创建文件工具——成稿只允许出现在最终输出文本里（编排器只取最终输出文本，文件内容不会被转发）；\n4. 禁止英文过程自述（I'll / Let me / JACKPOT / Word count 等）、写作计划与占位符（[N paragraphs]、[≤100字] 等）；\n5. 若你此前已把成稿写入工作区文件，直接把该文件内容全文复制进最终输出即可，不要重做调研。\n\n【原任务】\n${task}`
     r = await D(role, retryLabel, retryTask)
     verdict = assessDraft(r.ok ? r.text : '', gate)
   }
@@ -399,8 +455,11 @@ export async function executePhases(
   syncChapters(() => ({ status: undefined }))
 
   const dispatchChapter = async (s: ChapterState): Promise<void> => {
-    const task = `模式：深度研究（Phase 3 章节调研）。\n\n${cardDigest(card)}\n\n本章任务：第 ${s.index} 章「${s.title}」。按你角色「模式二」要求产出完整章节草稿（800-1500 字、≥${MIN_CHAPTER_SOURCES} 来源 ≥3 类型、带真实引用），末尾附「【本章小结】」（≤100 字，供主理人传给后续章节）和「本章新增来源」清单。\n输出纪律：最终输出直接从章节正文第一段开始，禁止输出推理过程、证据盘点、工作笔记或任何元话语；引用一律用 [标题](URL) 行内超链接。\n成稿边界：最终输出从「## 第 ${s.index} 章」标题行开始、以「本章新增来源」清单与【本章小结】结束，完整全文内联回传（编排器只取最终输出文本，写入工作区文件不会被转发）；全程中文，严禁 [N paragraphs]/[≤100字] 类占位符。`
-    const r = await dispatchWithGate(D, P, 'topic-researcher', `谭溯源·第${s.index}章`, `谭溯源·第${s.index}章·重派`, task, { kind: 'chapter', minChars: CHAPTER_MIN_CHARS })
+    const task = `【输出方式（最高优先级）】你的最终输出文本必须就是成稿全文：从「## 第 ${s.index} 章」标题行开始、以「本章新增来源」清单与【本章小结】结束；禁止把成稿写入工作区文件后只回传路径（编排器只取最终输出文本）。\n\n模式：深度研究（Phase 3 章节调研）。\n\n${cardDigest(card)}\n\n本章任务：第 ${s.index} 章「${s.title}」。按你角色「模式二」要求产出完整章节草稿（800-1500 字、≥${MIN_CHAPTER_SOURCES} 来源 ≥3 类型、带真实引用），末尾附「【本章小结】」（≤100 字，供主理人传给后续章节）和「本章新增来源」清单。\n输出纪律：最终输出直接从章节正文第一段开始，禁止输出推理过程、证据盘点、工作笔记或任何元话语；引用一律用 [标题](URL) 行内超链接。\n成稿边界：全程中文，严禁 [N paragraphs]/[≤100字] 类占位符。`
+    const dispatchStart = Date.now()
+    const gated = await dispatchWithGate(D, P, 'topic-researcher', `谭溯源·第${s.index}章`, `谭溯源·第${s.index}章·重派`, task, { kind: 'chapter', minChars: CHAPTER_MIN_CHARS })
+    const r = await rescueIfGated(gated, opts?.wsRoot, dispatchStart, { kind: 'chapter', minChars: CHAPTER_MIN_CHARS })
+    if (r.ok && !gated.ok) P(3, `📥 第 ${s.index} 章成稿已从工作区文件恢复（成员最终输出未内联成稿）`)
     try {
       s.draft = brief(r, `第${s.index}章调研`)
     } catch (e) {
@@ -544,10 +603,11 @@ export async function executePhases(
           `\n【审稿意见】\n${s.feedback}`,
           `\n【输出纪律】Part 1 完整修订稿全文内联 + Part 2 修改说明（以 --- 分隔）；全程中文；严禁把修订稿写入工作区文件后只回传路径或"以下为全文"式引导句。`,
         ].join('\n')
-        const revised = await dispatchWithGate(D, P, 'draft-reviser', `任润泽·第${s.index}章R${round}`, `任润泽·第${s.index}章R${round}·重派`, reviseTask, {
-          kind: 'revision',
-          minChars: Math.max(CHAPTER_MIN_CHARS, Math.floor((s.draft?.length ?? 0) * 0.6)),
-        })
+        const reviseGate = { kind: 'revision' as const, minChars: Math.max(CHAPTER_MIN_CHARS, Math.floor((s.draft?.length ?? 0) * 0.6)) }
+        const reviseStart = Date.now()
+        const gatedRevised = await dispatchWithGate(D, P, 'draft-reviser', `任润泽·第${s.index}章R${round}`, `任润泽·第${s.index}章R${round}·重派`, reviseTask, reviseGate)
+        const revised = await rescueIfGated(gatedRevised, opts?.wsRoot, reviseStart, reviseGate)
+        if (revised.ok && !gatedRevised.ok) P(3, `📥 第 ${s.index} 章修订稿已从工作区文件恢复（成员最终输出未内联修订稿）`)
         try {
           const revisedText = brief(revised, `第${s.index}章修订`)
           // 任润泽输出 = Part1 修订稿 + Part2 修改说明；按分隔约定拆分
@@ -723,6 +783,7 @@ export async function reviseChapter(
   track: RunTracker | undefined,
   chapterIndex: number,
   chapterFeedback?: string,
+  wsRoot?: string,
 ): Promise<ResearchCard> {
   const s = card.sections.find((x) => x.index === chapterIndex)
   if (!s) throw new Error(`章节 ${chapterIndex} 不存在（大纲共 ${card.sections.length} 章）`)
@@ -747,8 +808,11 @@ export async function reviseChapter(
     card.extraConstraints = [card.extraConstraints, `第${chapterIndex}章重修要求：${chapterFeedback}`].filter(Boolean).join('；')
   }
 
-  const task = `模式：深度研究（章节重修）。\n\n${cardDigest(card)}\n\n本章任务：重写/深化第 ${s.index} 章「${s.title}」，以最新草稿为起点、按附加要求补强。产出完整章节草稿（800-1500 字、≥${MIN_CHAPTER_SOURCES} 来源 ≥3 类型、带真实引用），末尾附「【本章小结】」和「本章新增来源」清单。\n成稿边界：最终输出从「## 第 ${s.index} 章」标题行开始、以「本章新增来源」清单与【本章小结】结束，完整全文内联回传（编排器只取最终输出文本，写入工作区文件不会被转发）；全程中文，严禁英文过程自述与占位符。`
-  const r = await dispatchWithGate(D, P, 'topic-researcher', `谭溯源·重修第${chapterIndex}章`, `谭溯源·重修第${chapterIndex}章·重派`, task, { kind: 'chapter', minChars: CHAPTER_MIN_CHARS })
+  const task = `【输出方式（最高优先级）】你的最终输出文本必须就是成稿全文：从「## 第 ${s.index} 章」标题行开始、以「本章新增来源」清单与【本章小结】结束；禁止把成稿写入工作区文件后只回传路径（编排器只取最终输出文本）。\n\n模式：深度研究（章节重修）。\n\n${cardDigest(card)}\n\n本章任务：重写/深化第 ${s.index} 章「${s.title}」，以最新草稿为起点、按附加要求补强。产出完整章节草稿（800-1500 字、≥${MIN_CHAPTER_SOURCES} 来源 ≥3 类型、带真实引用），末尾附「【本章小结】」和「本章新增来源」清单。\n成稿边界：全程中文，严禁英文过程自述与占位符。`
+  const dispatchStart = Date.now()
+  const gated = await dispatchWithGate(D, P, 'topic-researcher', `谭溯源·重修第${chapterIndex}章`, `谭溯源·重修第${chapterIndex}章·重派`, task, { kind: 'chapter', minChars: CHAPTER_MIN_CHARS })
+  const r = await rescueIfGated(gated, wsRoot, dispatchStart, { kind: 'chapter', minChars: CHAPTER_MIN_CHARS })
+  if (r.ok && !gated.ok) P(3, `📥 第 ${chapterIndex} 章重修成稿已从工作区文件恢复（成员最终输出未内联成稿）`)
   s.draft = brief(r, `第${chapterIndex}章重修调研`)
   const parts = harvestChapterParts(s.draft)
   s.draft = parts.draft
@@ -765,6 +829,7 @@ export async function reviseChapter(
       cardDigest(card),
       `\n【本章章节任务】第 ${s.index} 章「${s.title}」`,
       `\n【current_round】${round}/${MAX_REVIEW_ROUNDS}${forced ? '（强制通过轮）' : ''}`,
+      `\n【审查对象】仅审查本消息内嵌的【待审草稿】；不要读取工作区文件。`,
       `\n【待审草稿】\n${s.draft}`,
     ].join('\n'), { forceJson: true, outputSchema: REVIEW_SCHEMA })
     let verdictJson: { verdict: string; must_fix: string[]; suggestions: string[]; carry_over: string[] }
@@ -785,15 +850,16 @@ export async function reviseChapter(
       break
     }
     s.feedback = [...verdictJson.must_fix.map((m, i) => `${i + 1}. [必须修改] ${m}`), ...verdictJson.suggestions.map((m) => `- [建议] ${m}`)].join('\n')
-    const revised = await dispatchWithGate(D, P, 'draft-reviser', `任润泽·重修R${round}`, `任润泽·重修R${round}·重派`, [
+    const reviseGate = { kind: 'revision' as const, minChars: Math.max(CHAPTER_MIN_CHARS, Math.floor((s.draft?.length ?? 0) * 0.6)) }
+    const reviseStart = Date.now()
+    const gatedRevised = await dispatchWithGate(D, P, 'draft-reviser', `任润泽·重修R${round}`, `任润泽·重修R${round}·重派`, [
       cardDigest(card),
       `\n【原草稿】\n${s.draft}`,
       `\n【审稿意见】\n${s.feedback}`,
       `\n【输出纪律】Part 1 完整修订稿全文内联 + Part 2 修改说明（以 --- 分隔）；全程中文；严禁把修订稿写入工作区文件后只回传路径或"以下为全文"式引导句。`,
-    ].join('\n'), {
-      kind: 'revision',
-      minChars: Math.max(CHAPTER_MIN_CHARS, Math.floor((s.draft?.length ?? 0) * 0.6)),
-    })
+    ].join('\n'), reviseGate)
+    const revised = await rescueIfGated(gatedRevised, wsRoot, reviseStart, reviseGate)
+    if (revised.ok && !gatedRevised.ok) P(3, `📥 第 ${chapterIndex} 章重修修订稿已从工作区文件恢复`)
     try {
       const t = brief(revised, '重修修订')
       const splitAt = t.search(/^---\s*$/m)
@@ -809,7 +875,7 @@ export async function reviseChapter(
   syncChapter({ status: 'pass' as const })
 
   // 重跑 Phase 4/5（single 模式下为编排器拼装）
-  await executePhases(ctx, card, parent, signal, progress, track)
+  await executePhases(ctx, card, parent, signal, progress, track, { wsRoot })
   return card
 }
 

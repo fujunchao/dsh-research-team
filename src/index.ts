@@ -209,7 +209,7 @@ export function apply(ctx: Context & AppContext, config: Config): void {
             plans.updatePlan(entry.planId, { stage: 'executing' })
             status.resumeRun(run)
             progress_(`重修第 ${args.reviseChapter} 章（planId=${entry.planId}）`)
-            await reviseChapter(ctx, card, exec.agent, exec.signal, progress_, track, Number(args.reviseChapter), args.chapterFeedback)
+            await reviseChapter(ctx, card, exec.agent, exec.signal, progress_, track, Number(args.reviseChapter), args.chapterFeedback, wsRoot)
             const paths = await writeReports(ctx, exec.agent, config, card)
             plans.updatePlan(entry.planId, { stage: 'done', card })
             saveCp('done')
@@ -235,7 +235,7 @@ export function apply(ctx: Context & AppContext, config: Config): void {
               card.extraConstraints = [card.extraConstraints, `大纲反馈：${args.outlineFeedback}`].filter(Boolean).join('；')
             }
             progress_(`按用户反馈修订大纲（第 ${entry.revisionRound + 1} 轮）`)
-            const stop = await runResearch(ctx, card, exec.agent, exec.signal, progress_, track, { outlineFeedback: String(args.outlineFeedback), onCheckpoint: () => saveCp('executing') })
+            const stop = await runResearch(ctx, card, exec.agent, exec.signal, progress_, track, { outlineFeedback: String(args.outlineFeedback), onCheckpoint: () => saveCp('executing'), wsRoot })
             if (stop === 'awaiting-outline-confirm') {
               plans.updatePlan(entry.planId, { stage: 'awaiting-confirm', card })
               saveCp('awaiting-confirm')
@@ -254,7 +254,7 @@ export function apply(ctx: Context & AppContext, config: Config): void {
             plans.updatePlan(entry.planId, { stage: 'executing' })
             status.resumeRun(run)
             progress_(`大纲已确认（planId=${entry.planId}），续跑 Phase 3-5`)
-            const stop = await runResearch(ctx, card, exec.agent, exec.signal, progress_, track, { onCheckpoint: () => saveCp('executing') })
+            const stop = await runResearch(ctx, card, exec.agent, exec.signal, progress_, track, { onCheckpoint: () => saveCp('executing'), wsRoot })
             if (stop === 'awaiting-outline-confirm') {
               // quick/single 不会走到这；防御性处理
               plans.updatePlan(entry.planId, { stage: 'awaiting-confirm', card })
@@ -342,7 +342,7 @@ export function apply(ctx: Context & AppContext, config: Config): void {
       try {
         progress_(`立项：${args.topic}（${mode} / ${timeRange}）`)
         const skipConfirm = mode !== 'full' || args.skipOutlineConfirm === true
-        const stop = await runResearch(ctx, card, exec.agent, exec.signal, progress_, track, { skipConfirm, onCheckpoint: () => saveCp('executing') })
+        const stop = await runResearch(ctx, card, exec.agent, exec.signal, progress_, track, { skipConfirm, onCheckpoint: () => saveCp('executing'), wsRoot })
         if (stop === 'awaiting-outline-confirm') {
           plans.updatePlan(planId, { stage: 'awaiting-confirm', card })
           saveCp('awaiting-confirm')
