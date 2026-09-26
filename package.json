@@ -1,7 +1,7 @@
 {
   "name": "@dsh-external/dsh-research-team",
-  "version": "0.4.3",
-  "description": "\u6df1\u5ea6\u7814\u7a76\u4e13\u5bb6\u56e2\uff1a\u4e3b\u7406\u4eba+6\u4e13\u5bb6 5\u9636\u6bb5\u7f16\u6392\uff08\u521d\u8c03\u2192\u5927\u7eb2\u2192\u9010\u7ae0\u5ba1\u7a3f\u4fee\u8ba2\u2192\u6846\u67b6\u2192\u53d1\u5e03\uff09\uff0c\u4ea7\u51fa\u591a\u6e90\u5f15\u7528\u7814\u7a76\u62a5\u544a\u3002\u79fb\u690d\u81ea WorkBuddy gpt-researcher-team \u4e13\u5bb6\u56e2\u534f\u8bae",
+  "version": "0.4.4",
+  "description": "深度研究专家团：主理人+6专家 5阶段编排（初调→大纲→逐章审稿修订→框架→发布），产出多源引用研究报告。移植自 WorkBuddy gpt-researcher-team 专家团协议",
   "private": true,
   "type": "module",
   "main": "./lib/index.js",
