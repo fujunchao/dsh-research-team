@@ -87,20 +87,19 @@ export function extractJson(text: string): unknown {
   throw new Error('no parseable JSON object in member output')
 }
 
-/** Default per-member wall-clock budgets. Floor of 30 min everywhere:
- * with glm-5.3-flash at max reasoning effort, members routinely think for
- * 10+ minutes before emitting output (2026-09-20: planner disposed at 5 min
- * mid-reasoning, a chapter at 15 min), so shorter budgets kill live work.
- * topic-researcher gets 45 min — it does real multi-source web work and is
- * the only role observed to exceed 15 min. */
+/** Default per-member wall-clock budgets — 60 min everywhere (2026-09-26:
+ * the report-publisher was disposed at 30:00.1 mid-output and the report fell
+ * back to degraded assembly, so the user raised the floor to 1 hour).
+ * glm-5.3-flash at max reasoning effort routinely thinks 10+ minutes before
+ * emitting, and long web-research members legitimately run past 30 min. */
 const ROLE_BUDGETS_MS: Record<RoleId, number> = {
-  'topic-researcher': 45 * 60 * 1000,
-  'research-planner': 30 * 60 * 1000,
-  'draft-reviewer': 30 * 60 * 1000,
-  'draft-reviser': 30 * 60 * 1000,
-  'report-writer': 30 * 60 * 1000,
-  'report-publisher': 30 * 60 * 1000,
-  'research-chief-editor': 30 * 60 * 1000,
+  'topic-researcher': 60 * 60 * 1000,
+  'research-planner': 60 * 60 * 1000,
+  'draft-reviewer': 60 * 60 * 1000,
+  'draft-reviser': 60 * 60 * 1000,
+  'report-writer': 60 * 60 * 1000,
+  'report-publisher': 60 * 60 * 1000,
+  'research-chief-editor': 60 * 60 * 1000,
 }
 
 /** One dispatch attempt (no retry). */
