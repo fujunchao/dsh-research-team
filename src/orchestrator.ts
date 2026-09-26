@@ -218,6 +218,45 @@ async function rescueIfGated(
 }
 
 /**
+ * 章节调研的完整派发阶梯：内联成稿（含重派）→ 成稿整理步 → 工作区抢救。
+ *
+ * 三轮冒烟 + 火影 run 实证：glm-5.3-flash 调研做得好（工作笔记里全是素材与来源），
+ * 但"直接输出成稿全文"这一步持续失败（英文笔记/占位骨架/元话语）。把笔记作为素材
+ * 再派一次、任务降维成"笔记 → 中文成稿"的纯改写，是该模型可稳定完成的路径
+ * （火影 run 的修订员实质完成了这一步）。
+ */
+async function dispatchChapterWithFallback(
+  D: ReturnType<typeof makeRuntime>['D'],
+  P: ReturnType<typeof makeRuntime>['P'],
+  label: string,
+  retryLabel: string,
+  refineLabel: string,
+  task: string,
+  wsRoot: string | undefined,
+): Promise<DispatchResult> {
+  const dispatchStart = Date.now()
+  const gate = { kind: 'chapter' as const, minChars: CHAPTER_MIN_CHARS }
+  let r = await dispatchWithGate(D, P, 'topic-researcher', label, retryLabel, task, gate)
+  if (!r.ok && r.stopReason === 'quality-gate' && r.text.trim().length > 400) {
+    P(3, `🔁 ${label} 产出为研究工作笔记 — 派发成稿整理步（笔记 → 中文成稿全文）`)
+    const refineTask = `【任务：把研究工作笔记整理为最终成稿（最高优先级）】\n下面是你对该章的研究工作笔记。把它们整理为**最终章节成稿**，并作为最终输出全文回传：\n- 结构：从「## 第 N 章」标题行开始；正文论点→论据→分析→小结；含数据表格；末尾「### 关键发现」、「【本章小结】」（≤100 字）、「## 本章新增来源」清单\n- 事实性陈述带 [标题](URL) 引用（笔记里的来源直接复用，可少量补搜）\n- 全程中文，正文 800-1500 字；禁止英文过程自述、写作计划与占位符；不要写任何文件\n\n【你的工作笔记（素材，只读）】\n${r.text}`
+    const refineStart = Date.now()
+    const gatedRefine = await dispatchWithGate(D, P, 'topic-researcher', refineLabel, `${refineLabel}·重派`, refineTask, gate)
+    const refined = await rescueIfGated(gatedRefine, wsRoot, refineStart, gate)
+    if (refined.ok && !gatedRefine.ok) P(3, `📥 ${refineLabel} 成稿已从工作区文件恢复`)
+    if (refined.ok) r = refined
+  }
+  if (!r.ok && r.stopReason === 'quality-gate') {
+    const rescued = await rescueIfGated(r, wsRoot, dispatchStart, gate)
+    if (rescued.ok) {
+      P(3, `📥 ${label} 成稿已从工作区文件恢复`)
+      r = rescued
+    }
+  }
+  return r
+}
+
+/**
  * 派发成员并过成稿质量门：产出若是占位骨架/工作笔记/元话语而非成稿，
  * 附重派原因再派一次；仍不过门则以 ok:false（stopReason='quality-gate'）返回，
  * 由调用方走各自降级路径。派发本身的单次重试与中断感知语义由 D（dispatchMember）保持。
@@ -456,10 +495,7 @@ export async function executePhases(
 
   const dispatchChapter = async (s: ChapterState): Promise<void> => {
     const task = `【输出方式（最高优先级）】你的最终输出文本必须就是成稿全文：从「## 第 ${s.index} 章」标题行开始、以「本章新增来源」清单与【本章小结】结束；禁止把成稿写入工作区文件后只回传路径（编排器只取最终输出文本）。\n\n模式：深度研究（Phase 3 章节调研）。\n\n${cardDigest(card)}\n\n本章任务：第 ${s.index} 章「${s.title}」。按你角色「模式二」要求产出完整章节草稿（800-1500 字、≥${MIN_CHAPTER_SOURCES} 来源 ≥3 类型、带真实引用），末尾附「【本章小结】」（≤100 字，供主理人传给后续章节）和「本章新增来源」清单。\n输出纪律：最终输出直接从章节正文第一段开始，禁止输出推理过程、证据盘点、工作笔记或任何元话语；引用一律用 [标题](URL) 行内超链接。\n成稿边界：全程中文，严禁 [N paragraphs]/[≤100字] 类占位符。`
-    const dispatchStart = Date.now()
-    const gated = await dispatchWithGate(D, P, 'topic-researcher', `谭溯源·第${s.index}章`, `谭溯源·第${s.index}章·重派`, task, { kind: 'chapter', minChars: CHAPTER_MIN_CHARS })
-    const r = await rescueIfGated(gated, opts?.wsRoot, dispatchStart, { kind: 'chapter', minChars: CHAPTER_MIN_CHARS })
-    if (r.ok && !gated.ok) P(3, `📥 第 ${s.index} 章成稿已从工作区文件恢复（成员最终输出未内联成稿）`)
+    const r = await dispatchChapterWithFallback(D, P, `谭溯源·第${s.index}章`, `谭溯源·第${s.index}章·重派`, `谭溯源·第${s.index}章·成稿整理`, task, opts?.wsRoot)
     try {
       s.draft = brief(r, `第${s.index}章调研`)
     } catch (e) {
@@ -809,10 +845,7 @@ export async function reviseChapter(
   }
 
   const task = `【输出方式（最高优先级）】你的最终输出文本必须就是成稿全文：从「## 第 ${s.index} 章」标题行开始、以「本章新增来源」清单与【本章小结】结束；禁止把成稿写入工作区文件后只回传路径（编排器只取最终输出文本）。\n\n模式：深度研究（章节重修）。\n\n${cardDigest(card)}\n\n本章任务：重写/深化第 ${s.index} 章「${s.title}」，以最新草稿为起点、按附加要求补强。产出完整章节草稿（800-1500 字、≥${MIN_CHAPTER_SOURCES} 来源 ≥3 类型、带真实引用），末尾附「【本章小结】」和「本章新增来源」清单。\n成稿边界：全程中文，严禁英文过程自述与占位符。`
-  const dispatchStart = Date.now()
-  const gated = await dispatchWithGate(D, P, 'topic-researcher', `谭溯源·重修第${chapterIndex}章`, `谭溯源·重修第${chapterIndex}章·重派`, task, { kind: 'chapter', minChars: CHAPTER_MIN_CHARS })
-  const r = await rescueIfGated(gated, wsRoot, dispatchStart, { kind: 'chapter', minChars: CHAPTER_MIN_CHARS })
-  if (r.ok && !gated.ok) P(3, `📥 第 ${chapterIndex} 章重修成稿已从工作区文件恢复（成员最终输出未内联成稿）`)
+  const r = await dispatchChapterWithFallback(D, P, `谭溯源·重修第${chapterIndex}章`, `谭溯源·重修第${chapterIndex}章·重派`, `谭溯源·重修第${chapterIndex}章·成稿整理`, task, wsRoot)
   s.draft = brief(r, `第${chapterIndex}章重修调研`)
   const parts = harvestChapterParts(s.draft)
   s.draft = parts.draft
