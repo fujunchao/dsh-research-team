@@ -47,7 +47,6 @@ link_pkg @deepseek-ai/dsh-subagent              "$PROFILE_NM/@deepseek-ai/dsh-su
 link_pkg @deepseek-ai/dsh-llm                   "$PROFILE_NM/@deepseek-ai/dsh-llm"
 # Client-side type packages.
 link_pkg @deepseek-ai/dsh-client-ui-renderer    "$PROFILE_NM/@deepseek-ai/dsh-client-ui-renderer"
-link_pkg @deepseek-ai/dsh-client-ui-slots       "$PROFILE_NM/@deepseek-ai/dsh-client-ui-slots"
 link_pkg @deepseek-ai/dsh-client-ui-settings    "$PROFILE_NM/@deepseek-ai/dsh-client-ui-settings"
 # react + node types (from the sibling vault plugin's pnpm store).
 VAULT_PNPM="$PROFILE_NM"

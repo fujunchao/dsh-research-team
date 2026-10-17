@@ -1,6 +1,6 @@
 {
   "name": "@dsh-external/dsh-research-team",
-  "version": "0.4.5",
+  "version": "0.4.6",
   "description": "深度研究专家团：主理人+6专家 5阶段编排（初调→大纲→逐章审稿修订→框架→发布），产出多源引用研究报告。移植自 WorkBuddy gpt-researcher-team 专家团协议",
   "private": true,
   "type": "module",
@@ -43,8 +43,6 @@
     },
     "client": {
       "inject": [
-        "@deepseek-ai/dsh-client-runtime",
-        "@deepseek-ai/dsh-client-ui-slots",
         "@deepseek-ai/dsh-client-ui-settings"
       ],
       "platform": "web"
@@ -63,11 +61,10 @@
   },
   "dependencies": {
     "@deepseek-ai/cordis": "~4.0.4",
-    "@deepseek-ai/dsh-client-ui-renderer": "0.1.7-rc.2",
-    "@deepseek-ai/dsh-client-ui-settings": "0.1.7-rc.2",
-    "@deepseek-ai/dsh-client-ui-slots": "0.1.7-rc.2",
-    "@deepseek-ai/dsh-subagent": "0.1.7-rc.2",
-    "@deepseek-ai/dsh-tools": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-client-ui-renderer": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-settings": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-subagent": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-tools": "0.2.1-rc.2",
     "@deepseek-ai/schemastery": "~3.18.4"
   },
   "peerDependencies": {
